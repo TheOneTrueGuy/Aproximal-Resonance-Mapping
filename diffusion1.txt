@@ -1,0 +1,75 @@
+ # --- 0. Setup ---
+!pip install diffusers accelerate transformers safetensors torch torchvision -q
+
+import torch
+import torch.nn.functional as F
+import numpy as np
+from diffusers import StableDiffusionXLPipeline
+from sklearn.decomposition import TruncatedSVD
+import matplotlib.pyplot as plt
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# --- 1. Load SDXL pipeline ---
+pipe = StableDiffusionXLPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-xl-base-1.0",
+    torch_dtype=torch.float16,
+    variant="fp16",
+).to(device)
+
+pipe.enable_vae_tiling()  # helps with large images
+vae = pipe.vae
+text_encoder = pipe.text_encoder
+
+# --- 2. Get initial latent from prompt ---
+prompt = "A surreal cityscape with fractal towers"
+generator = torch.manual_seed(42)
+
+# Encode text
+text_inputs = pipe.tokenizer(prompt, return_tensors="pt").to(device)
+text_embeds = text_encoder(**text_inputs).last_hidden_state
+
+# Sample initial latent z0 from Gaussian prior
+z0 = torch.randn((1, pipe.unet.config.in_channels, 64, 64), device=device, generator=generator)
+
+# --- 3. Define proximal perturbations ---
+def make_probes(z, n_probes=16, eps=0.1):
+    """Generate perturbations around a latent z."""
+    probes = []
+    for _ in range(n_probes):
+        noise = torch.randn_like(z)
+        noise = noise / noise.norm() * eps * z.norm()
+        probes.append(z + noise)
+    return torch.cat(probes, dim=0)
+
+z_probes = make_probes(z0, n_probes=32, eps=0.05)
+
+# --- 4. Decode latent probes (via VAE) ---
+with torch.no_grad():
+    imgs = vae.decode(z_probes / vae.config.scaling_factor).sample
+
+# Convert to numpy for viz
+imgs = (imgs.clamp(-1, 1) + 1) / 2
+imgs = imgs.cpu().permute(0,2,3,1).numpy()
+
+# --- 5. Measure resonance response ---
+# Flatten decoded images to vectors
+X = imgs.reshape(len(imgs), -1)
+
+# Center w.r.t original
+X_centered = X - X.mean(axis=0)
+
+# Perform SVD to see dominant resonance modes
+svd = TruncatedSVD(n_components=10)
+svd.fit(X_centered)
+
+print("Explained variance ratios:", svd.explained_variance_ratio_)
+
+# --- 6. Visualize probes + first resonance mode ---
+plt.figure(figsize=(10,10))
+for i in range(9):
+    plt.subplot(3,3,i+1)
+    plt.imshow(imgs[i])
+    plt.axis("off")
+plt.suptitle("ARM proximal probes around z0", fontsize=14)
+plt.show()
