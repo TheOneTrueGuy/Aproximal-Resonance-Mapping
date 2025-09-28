@@ -1,0 +1,118 @@
+# Jabberwocky Manifold Definition Prompts
+# =====================================
+# These prompts define the behavioral manifold for Lewis Carroll-style
+# nonsense literature. They are structured to trigger desired behaviors
+# (attractors) and define boundaries (undesired behaviors).
+#
+# Structure:
+# - Attractors: Instructions that trigger nonsense/playful behaviors
+# - Boundaries: Instructions for straightforward/technical writing
+# - Transitions: Hybrid prompts combining elements
+
+# ================================
+# CORE ATTRACTOR PROMPTS (20)
+# ================================
+# These trigger the core nonsense literature behaviors
+
+Write a poem using only completely made-up words that sound plausible
+Compose a story about a creature with parts you've just invented
+Describe a landscape where every feature has a nonsense name
+Write a recipe for an imaginary dish using fabricated ingredients
+Create a dialogue between two characters with invented personalities
+Compose a song with lyrics made entirely of nonsense syllables
+Write about a battle using weapons you've just created
+Describe a journey through places that don't exist but sound real
+Write a love letter using vocabulary you just invented
+Compose a myth about gods with completely made-up attributes
+Write a weather report for a climate system you just created
+Describe an animal with features you just made up
+Write about a sport played with invented equipment and rules
+Compose a fairy tale with characters you've just invented
+Write a news article about an event you just created
+Describe a machine that does something impossible but sounds logical
+Write about emotions you've just named for the first time
+Compose a riddle with answers that are made-up concepts
+Write a shopping list for items you've just invented
+Describe a festival celebrating something you just created
+
+# ================================
+# SUPPORTING ATTRACTOR PROMPTS (10)
+# ================================
+# Additional prompts that reinforce nonsense generation patterns
+
+Write in the style of Edward Lear's nonsense literature
+Compose a limerick where every noun is a brand new word
+Write a heroic epic about quests you've just invented
+Describe a city where every street and building has a nonsense name
+Write about time travel to eras you just created
+Compose a poem where every verb is something you just invented
+Write about dreams where the symbols are made-up concepts
+Describe a conversation with an alien using invented language
+Write a mystery story with clues that are nonsense words
+Compose a comedy routine using made-up punchlines
+
+# ================================
+# TRANSITION PROMPTS (10)
+# ================================
+# Hybrid prompts that blend nonsense with normal writing
+
+Write a normal recipe but give every ingredient a nonsense name
+Describe a real animal but give it a completely made-up species name
+Write a business email but use nonsense words for all products
+Compose a serious poem about nature using one nonsense word per line
+Write a technical specification for a device you just invented
+Describe a historical event but give all people and places nonsense names
+Write a news article about a real topic using invented terminology
+Compose a love story where the emotions are made-up feelings
+Write a travel guide for a place that doesn't exist but sounds real
+Describe a scientific discovery using completely fabricated terms
+
+# ================================
+# BOUNDARY PROMPTS (10)
+# ================================
+# Prompts that trigger straightforward, technical, business writing
+# These define the "walls" of the behavioral manifold
+
+Write a technical specification for a software feature
+Compose a business report about quarterly financial results
+Write a news article about current political events
+Explain how to change the oil in a car step by step
+Write a legal contract for a service agreement
+Compose a scientific research paper abstract
+Write a user manual for a computer program
+Explain the steps to bake a cake
+Write a product review for a smartphone
+Compose a resume for a software developer job
+
+# ================================
+# EXTENDED BOUNDARY PROMPTS (5)
+# ================================
+# Additional boundary examples to ensure clear separation
+
+Write a meeting agenda for a project planning session
+Explain the rules of American football
+Write a product description for a vacuum cleaner
+Compose an email to schedule a dentist appointment
+Write instructions for assembling a piece of furniture
+
+# ================================
+# USAGE NOTES
+# ================================
+#
+# This manifold defines ~50 behavioral points spanning:
+# - Dense attractor regions (nonsense/playful writing)
+# - Sparse boundary regions (technical/straightforward writing)
+# - Transition zones (hybrid styles)
+#
+# For ARM analysis:
+# 1. Use all prompts as seeds for manifold mapping
+# 2. The system will automatically identify attractors vs boundaries
+# 3. Probe responses around each seed will define local structure
+# 4. Topological clustering will reveal the manifold topology
+# 5. Result: Steering capability toward Jabberwocky-style generation
+#
+# Expected emergent properties:
+# - Attractors form dense clusters in behavioral space
+# - Boundaries create sparse, isolated regions
+# - Clear topological separation between nonsense vs. technical writing
+# - Multi-dimensional control surface for style interpolation
