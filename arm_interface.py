@@ -22,6 +22,7 @@ import json
 import pickle
 import base64
 import io
+import os
 
 from arm_library.core.arm_mapper import ARMMapper
 from arm_library.utils.config import ARMConfig
@@ -30,6 +31,10 @@ from arm_library.interfaces.model_interface import TransformerModelInterface, Mo
 # Set up plotting style
 plt.style.use('default')
 sns.set_palette("husl")
+
+# Create output directory for plots
+OUTPUT_DIR = "arm_output"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 class ARMInterface:
     """Interactive interface for ARM operations."""
@@ -237,8 +242,9 @@ class ARMInterface:
 
         plt.tight_layout()
 
-        # Save plot
-        plot_path = "resonance_analysis.png"
+        # Save plot to output directory with unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        plot_path = os.path.join(OUTPUT_DIR, f"resonance_analysis_{timestamp}.png")
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close()
 
@@ -282,8 +288,9 @@ class ARMInterface:
 
         plt.tight_layout()
 
-        # Save plot
-        plot_path = "topology_analysis.png"
+        # Save plot to output directory with unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        plot_path = os.path.join(OUTPUT_DIR, f"topology_analysis_{timestamp}.png")
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close()
 
@@ -313,8 +320,9 @@ class ARMInterface:
 
         plt.tight_layout()
 
-        # Save plot
-        plot_path = "descriptor_analysis.png"
+        # Save plot to output directory with unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        plot_path = os.path.join(OUTPUT_DIR, f"descriptor_analysis_{timestamp}.png")
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         plt.close()
 
@@ -510,13 +518,40 @@ class ARMInterface:
         except Exception as e:
             return f"❌ Load failed: {str(e)}", "", "", "", ""
 
-    def load_prompt_file(self, file_obj) -> str:
+    def load_prompt_file(self, file_input) -> str:
         """Load prompts from a text file."""
-        if file_obj is None:
-            return "Enter prompts manually or upload a prompt file"
+        if file_input is None:
+            return "Please select a .txt file first using the file upload component above."
 
         try:
-            content = file_obj.read().decode('utf-8')
+            # Handle different types of file input from Gradio
+            content = None
+
+            if hasattr(file_input, 'read'):
+                # File-like object
+                content = file_input.read().decode('utf-8')
+            elif hasattr(file_input, 'name') and isinstance(file_input.name, str):
+                # File path string - open and read the file
+                with open(file_input.name, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            elif isinstance(file_input, str):
+                # Direct file path string
+                with open(file_input, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            elif isinstance(file_input, list) and len(file_input) > 0:
+                # Sometimes Gradio returns a list
+                first_item = file_input[0]
+                if hasattr(first_item, 'name'):
+                    with open(first_item.name, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                elif isinstance(first_item, str):
+                    with open(first_item, 'r', encoding='utf-8') as f:
+                        content = f.read()
+            else:
+                return f"❌ Unsupported file input type: {type(file_input)}. Please select a valid .txt file."
+
+            if content is None:
+                return "❌ Could not read file content. Please check the file and try again."
 
             # Parse prompts: skip comments (lines starting with #) and empty lines
             prompts = []
@@ -526,15 +561,14 @@ class ARMInterface:
                     prompts.append(line)
 
             if not prompts:
-                return "No valid prompts found in file. Prompts should be one per line, not starting with #"
+                return "No valid prompts found in file. Make sure your .txt file contains prompts (one per line) that don't start with #."
 
             # Join prompts for the textbox
             prompt_text = '\n'.join(prompts)
-
-            return prompt_text
+            return f"✅ Successfully loaded {len(prompts)} prompts from file!\n\n{prompt_text}"
 
         except Exception as e:
-            return f"❌ Failed to load prompt file: {str(e)}"
+            return f"❌ Failed to load prompt file: {str(e)}. Please check that the file is a valid .txt file."
 
     def convert_results_for_saving(self, results: Dict[str, Any]) -> Dict[str, Any]:
         """Convert results to JSON-serializable format."""
@@ -657,18 +691,12 @@ def create_gradio_interface():
                         value="The cat sat on the mat\nOnce upon a time\nIn the beginning"
                     )
 
-                    # File upload for prompt files
-                    with gr.Row():
-                        prompt_file_input = gr.File(
-                            label="Or upload prompt file (.txt)",
-                            file_types=[".txt"],
-                            file_count="single"
-                        )
-                        load_prompts_btn = gr.Button(
-                            "📂 Load Prompts from File",
-                            variant="secondary",
-                            size="sm"
-                        )
+                    # File upload for prompt files (auto-loads when selected)
+                    prompt_file_input = gr.File(
+                        label="Upload prompt file (.txt) - prompts auto-load when selected",
+                        file_types=[".txt"],
+                        file_count="single"
+                    )
 
                     analyze_btn = gr.Button(
                         "🔬 Run ARM Analysis",
@@ -911,7 +939,8 @@ def create_gradio_interface():
             """)
 
         # Event handlers
-        load_prompts_btn.click(
+        # Auto-load prompts when file is selected
+        prompt_file_input.change(
             fn=arm_interface.load_prompt_file,
             inputs=[prompt_file_input],
             outputs=[prompts_input]

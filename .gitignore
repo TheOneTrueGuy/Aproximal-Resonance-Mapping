@@ -46,6 +46,7 @@ Thumbs.db
 demo_results.json
 demo_results.pkl
 experiment_results/
+arm_output/
 
 # Temporary files
 *.tmp
