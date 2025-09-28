@@ -325,7 +325,11 @@ class ARMInterface:
         target_prompt: str,
         temperature: float,
         max_tokens: int,
-        use_arm_steering: bool
+        steering_mode: str,
+        positive_indices: str = "",
+        negative_indices: str = "",
+        target_signature_index: int = 0,
+        steering_strength: float = 1.0
     ) -> str:
         """Generate text with optional ARM steering."""
 
@@ -333,36 +337,64 @@ class ARMInterface:
             return "❌ Error: Please run ARM analysis first before generating steered text."
 
         try:
-            # Get the model interface from the mapper
-            model_interface = self.current_mapper.model_interface
+            if steering_mode == "none":
+                # Generate baseline text without steering
+                generator = self.current_mapper.create_controlled_generator()
+                generated_text = generator.generate_with_steering(
+                    target_prompt, max_tokens, temperature, do_sample=True
+                )
+                return f"📝 Baseline generation:\n\n{generated_text}"
 
-            if use_arm_steering:
-                # This would require implementing actual steering logic
-                # For now, just generate normally but note that steering isn't implemented yet
-                result = f"⚠️ ARM steering not yet implemented in this interface.\n\nGenerating baseline text instead:\n\n"
+            elif steering_mode == "control_vector":
+                # Parse positive and negative indices
+                try:
+                    pos_indices = [int(x.strip()) for x in positive_indices.split(',') if x.strip()]
+                    neg_indices = [int(x.strip()) for x in negative_indices.split(',') if x.strip()]
+                except ValueError:
+                    return "❌ Error: Positive and negative indices must be comma-separated integers (e.g., '0,1,2')"
+
+                if not pos_indices or not neg_indices:
+                    return "❌ Error: Need at least one positive and one negative example index"
+
+                # Compute control vector
+                control_vector = self.current_mapper.compute_steering_vector_from_manifold(
+                    pos_indices, neg_indices
+                )
+                control_vector.coefficient = steering_strength
+
+                # Generate with steering
+                generator = self.current_mapper.create_controlled_generator()
+                generator.set_control(control_vector)
+                try:
+                    generated_text = generator.generate_with_steering(
+                        target_prompt, max_tokens, temperature, do_sample=True
+                    )
+                finally:
+                    generator.clear_controls()
+
+                return f"🎯 Control vector steering (strength: {steering_strength}):\n\nPositive examples: {pos_indices}\nNegative examples: {neg_indices}\n\n{generated_text}"
+
+            elif steering_mode == "manifold_signature":
+                # Steer toward a specific resonance signature
+                if target_signature_index >= len(self.current_results['seed_analyses']):
+                    return f"❌ Error: Target signature index {target_signature_index} is out of range (0-{len(self.current_results['seed_analyses'])-1})"
+
+                target_analysis = self.current_results['seed_analyses'][target_signature_index]
+                target_signature = target_analysis['resonance_signature']['s_norm']
+
+                generated_text = self.current_mapper.steer_generation_toward_signature(
+                    prompt=target_prompt,
+                    target_signature=target_signature,
+                    max_length=max_tokens,
+                    temperature=temperature,
+                    steering_strength=steering_strength
+                )
+
+                prompt_text = self.current_results['prompts'][target_signature_index]
+                return f"🌀 Manifold signature steering (strength: {steering_strength}):\n\nTarget signature from: '{prompt_text}'\n\n{generated_text}"
+
             else:
-                result = "Generating baseline text:\n\n"
-
-            # Generate baseline text
-            inputs = model_interface.encode_prompt(target_prompt)
-            outputs = model_interface.model.generate(
-                inputs[0],
-                max_length=len(inputs[0][0]) + max_tokens,
-                num_return_sequences=1,
-                do_sample=True,
-                temperature=temperature,
-                pad_token_id=model_interface.tokenizer.pad_token_id,
-                eos_token_id=model_interface.tokenizer.eos_token_id,
-            )
-
-            generated_text = model_interface.tokenizer.decode(
-                outputs[0][len(inputs[0][0]):],
-                skip_special_tokens=True
-            ).strip()
-
-            result += generated_text
-
-            return result
+                return f"❌ Error: Unknown steering mode '{steering_mode}'"
 
         except Exception as e:
             return f"❌ Text generation failed: {str(e)}"
@@ -754,8 +786,8 @@ def create_gradio_interface():
             gr.Markdown("""
             ### Generate Text with ARM Steering
 
-            This feature allows you to generate text that follows the behavioral patterns
-            discovered by ARM analysis. (Steering implementation coming soon)
+            Generate text that follows behavioral patterns discovered by ARM analysis.
+            Choose from different steering modes to control the generated output.
             """)
 
             with gr.Row():
@@ -766,23 +798,59 @@ def create_gradio_interface():
                         value="The Jabberwock, with eyes of flame,"
                     )
 
-                    temperature = gr.Slider(
-                        minimum=0.1, maximum=2.0, value=0.8, step=0.1,
-                        label="Temperature",
-                        info="Controls randomness (higher = more random)"
+                    steering_mode = gr.Radio(
+                        choices=["none", "control_vector", "manifold_signature"],
+                        value="none",
+                        label="Steering Mode",
+                        info="Type of steering to apply"
                     )
 
-                    max_tokens = gr.Slider(
-                        minimum=10, maximum=200, value=50, step=10,
-                        label="Max Tokens",
-                        info="Maximum tokens to generate (0 = until stop token)"
+                    with gr.Row():
+                        temperature = gr.Slider(
+                            minimum=0.1, maximum=2.0, value=0.8, step=0.1,
+                            label="Temperature",
+                            info="Controls randomness (higher = more random)"
+                        )
+
+                        max_tokens = gr.Slider(
+                            minimum=10, maximum=200, value=50, step=10,
+                            label="Max Tokens",
+                            info="Maximum tokens to generate"
+                        )
+
+                    steering_strength = gr.Slider(
+                        minimum=0.0, maximum=3.0, value=1.0, step=0.1,
+                        label="Steering Strength",
+                        info="How strongly to apply steering (0 = no steering)"
                     )
 
-                    use_steering = gr.Checkbox(
-                        label="Use ARM Steering",
-                        value=False,
-                        info="Apply ARM-discovered patterns to guide generation (not yet implemented)"
-                    )
+                    # Control vector steering options
+                    with gr.Group(visible=False) as control_vector_group:
+                        gr.Markdown("**Control Vector Steering**")
+                        gr.Markdown("Specify seed indices (0-based) for positive and negative examples:")
+
+                        positive_indices = gr.Textbox(
+                            label="Positive Example Indices",
+                            placeholder="e.g., 0,1,2",
+                            info="Comma-separated indices of seeds to use as positive examples"
+                        )
+
+                        negative_indices = gr.Textbox(
+                            label="Negative Example Indices",
+                            placeholder="e.g., 3,4",
+                            info="Comma-separated indices of seeds to use as negative examples"
+                        )
+
+                    # Manifold signature steering options
+                    with gr.Group(visible=False) as manifold_group:
+                        gr.Markdown("**Manifold Signature Steering**")
+                        gr.Markdown("Steer toward the resonance signature of a specific seed:")
+
+                        target_signature_index = gr.Slider(
+                            minimum=0, maximum=10, value=0, step=1,
+                            label="Target Signature Index",
+                            info="Index of the seed whose resonance signature to target"
+                        )
 
                 with gr.Column():
                     generate_btn = gr.Button(
@@ -794,9 +862,19 @@ def create_gradio_interface():
                     generated_output = gr.Textbox(
                         label="Generated Text",
                         interactive=False,
-                        lines=12,
+                        lines=15,
                         placeholder="Generated text will appear here..."
                     )
+
+                    gr.Markdown("""
+                    ### Steering Modes
+
+                    **None**: Standard generation without steering
+
+                    **Control Vector**: Like RepE - steer away from negative examples toward positive examples
+
+                    **Manifold Signature**: Steer toward the resonance pattern of a specific analyzed prompt
+                    """)
 
         with gr.Tab("Help & Documentation"):
 
@@ -848,9 +926,27 @@ def create_gradio_interface():
             outputs=[status_output, summary_output, resonance_plot, topology_plot, descriptor_plot]
         )
 
+        # Show/hide steering options based on mode
+        def update_steering_visibility(mode):
+            if mode == "control_vector":
+                return [gr.Group(visible=True), gr.Group(visible=False)]
+            elif mode == "manifold_signature":
+                return [gr.Group(visible=False), gr.Group(visible=True)]
+            else:
+                return [gr.Group(visible=False), gr.Group(visible=False)]
+
+        steering_mode.change(
+            fn=update_steering_visibility,
+            inputs=[steering_mode],
+            outputs=[control_vector_group, manifold_group]
+        )
+
         generate_btn.click(
             fn=arm_interface.generate_steered_text,
-            inputs=[target_prompt, temperature, max_tokens, use_steering],
+            inputs=[
+                target_prompt, temperature, max_tokens, steering_mode,
+                positive_indices, negative_indices, target_signature_index, steering_strength
+            ],
             outputs=[generated_output]
         )
 
