@@ -1,0 +1,1183 @@
+Directory structure:
+└── core/
+    ├── arm_mapper.py
+    ├── probe_generator.py
+    ├── resonance_analyzer.py
+    ├── steering.py
+    └── topology_mapper.py
+
+================================================
+FILE: arm_library/core/arm_mapper.py
+================================================
+"""
+Main ARM (Aproximal Resonance Mapping) orchestrator class.
+"""
+
+import torch
+import numpy as np
+from typing import List, Dict, Any, Optional, Tuple
+import numpy.typing as npt
+
+from .probe_generator import ProbeGenerator
+from .resonance_analyzer import ResonanceAnalyzer
+from .topology_mapper import TopologyMapper
+from .steering import ARMControlVectorComputer, ARMControlledGenerator, ARMControlVector
+from ..interfaces.model_interface import TransformerModelInterface
+from ..utils.config import ARMConfig, ModelConfig
+
+
+class ARMMapper:
+    """Main class for Aproximal Resonance Mapping of transformer latent manifolds."""
+
+    def __init__(self, config: ARMConfig):
+        self.config = config
+
+        # Initialize components
+        self.model_interface = TransformerModelInterface(ModelConfig(
+            model_name=config.model_name,
+            device=config.device
+        ))
+
+        self.probe_generator = ProbeGenerator(config)
+        self.resonance_analyzer = ResonanceAnalyzer(config)
+        self.topology_mapper = TopologyMapper(config)
+
+    def collect_activation_matrix(
+        self,
+        prompt: str,
+        k: Optional[int] = None,
+        steps: Optional[int] = None,
+        eps: Optional[float] = None
+    ) -> npt.NDArray[np.float32]:
+        """
+        Collect activation matrix for a seed prompt by probing its neighborhood.
+
+        Args:
+            prompt: Seed prompt
+            k: Number of probes
+            steps: Steps per probe
+            eps: Perturbation magnitude
+
+        Returns:
+            Activation matrix, shape (k*steps, n_features)
+        """
+        k = k or self.config.probes_per_seed
+        steps = steps or self.config.steps_per_probe
+        eps = eps or self.config.eps
+
+        # Get base hidden state
+        hidden_base = self.model_interface.get_hidden_at_layer(prompt, self.config.layer_to_probe)
+        hidden_base_np = hidden_base.numpy()
+
+        # Generate probe batch
+        probe_paths, _ = self.probe_generator.generate_probe_batch(
+            hidden_base_np, k=k, steps=steps, eps=eps
+        )
+
+        # Collect activations for each probe point
+        rows = []
+        for path in probe_paths:
+            for hidden_pert in path:
+                # Convert to tensor with batch dimension
+                h_t = torch.tensor(hidden_pert[None, :, :], dtype=torch.float32, device=self.config.device)
+
+                # Forward from probe layer
+                logits, final_h, _ = self.model_interface.forward_from_layer(
+                    h_t, start_layer=self.config.layer_to_probe
+                )
+
+                # Extract features based on config
+                if self.config.feature_type == "hidden_pooled":
+                    feat = final_h.squeeze(0).mean(dim=0).detach().cpu().numpy()
+                elif self.config.feature_type == "logits_last":
+                    feat = logits[0, -1, :].detach().cpu().numpy()
+                else:
+                    raise ValueError(f"Unknown feature_type: {self.config.feature_type}")
+
+                rows.append(feat)
+
+        return np.stack(rows, axis=0).astype(np.float32)
+
+    def analyze_seed_point(self, prompt: str) -> Dict[str, Any]:
+        """
+        Perform complete ARM analysis for a single seed point.
+
+        Args:
+            prompt: Seed prompt
+
+        Returns:
+            Complete analysis results
+        """
+        # Collect activation matrix
+        A = self.collect_activation_matrix(prompt)
+
+        # Resonance analysis
+        resonance_sig = self.resonance_analyzer.resonance_signature(A)
+
+        # Topology analysis
+        persistence_data = self.topology_mapper.local_persistence(A)
+
+        # Combined descriptor
+        descriptor = self.topology_mapper.compute_topological_descriptor(
+            resonance_sig, persistence_data
+        )
+
+        return {
+            'prompt': prompt,
+            'activation_matrix': A,
+            'resonance_signature': resonance_sig,
+            'persistence_data': persistence_data,
+            'descriptor': descriptor,
+        }
+
+    def map_latent_manifold(
+        self,
+        seed_prompts: List[str],
+        progress_callback: Optional[callable] = None
+    ) -> Dict[str, Any]:
+        """
+        Map the latent manifold by analyzing multiple seed points.
+
+        Args:
+            seed_prompts: List of seed prompts
+            progress_callback: Optional callback for progress updates
+
+        Returns:
+            Complete manifold mapping results
+        """
+        seed_analyses = []
+
+        for i, prompt in enumerate(seed_prompts):
+            if progress_callback:
+                progress_callback(i, len(seed_prompts), f"Analyzing seed {i+1}/{len(seed_prompts)}")
+
+            analysis = self.analyze_seed_point(prompt)
+            seed_analyses.append(analysis)
+
+        # Extract resonance signatures for global analysis
+        resonance_sigs = [analysis['resonance_signature'] for analysis in seed_analyses]
+
+        # Build resonance graph
+        graph_data = self.topology_mapper.build_resonance_graph(resonance_sigs)
+
+        # Detect attractor basins
+        clustering_data = self.topology_mapper.detect_attractor_basins(resonance_sigs, graph_data)
+
+        # Extract descriptors
+        descriptors = np.array([analysis['descriptor'] for analysis in seed_analyses])
+
+        # Store results for steering methods
+        results = {
+            'seed_analyses': seed_analyses,
+            'graph_data': graph_data,
+            'clustering_data': clustering_data,
+            'descriptors': descriptors,
+            'n_seeds': len(seed_prompts),
+            'prompts': seed_prompts,  # Store prompts for steering
+            'layer_to_probe': self.config.layer_to_probe,  # Store layer info
+        }
+        self._last_results = results
+
+        return results
+
+    def find_similar_seeds(
+        self,
+        target_signature: Dict[str, Any],
+        seed_analyses: List[Dict[str, Any]],
+        top_k: int = 5,
+        metric: str = "cosine"
+    ) -> List[Tuple[int, float]]:
+        """
+        Find seeds with similar resonance patterns to a target signature.
+
+        Args:
+            target_signature: Target resonance signature
+            seed_analyses: List of seed analyses
+            top_k: Number of most similar seeds to return
+            metric: Similarity metric
+
+        Returns:
+            List of (seed_index, similarity_score) tuples
+        """
+        similarities = []
+
+        for i, analysis in enumerate(seed_analyses):
+            sig = analysis['resonance_signature']
+            similarity = self.resonance_analyzer.compare_resonance_signatures(
+                target_signature, sig, metric=metric
+            )
+            similarities.append((i, similarity))
+
+        # Sort by similarity (higher is better for cosine, lower for distances)
+        if metric == "cosine":
+            similarities.sort(key=lambda x: x[1], reverse=True)
+        else:
+            similarities.sort(key=lambda x: x[1])
+
+        return similarities[:top_k]
+
+    def create_control_vector_computer(self) -> ARMControlVectorComputer:
+        """Create a control vector computer for steering."""
+        return ARMControlVectorComputer(self.model_interface)
+
+    def create_controlled_generator(self) -> ARMControlledGenerator:
+        """Create a controlled generator for steered text generation."""
+        return ARMControlledGenerator(self.model_interface)
+
+    def compute_steering_vector_from_manifold(
+        self,
+        positive_region_indices: List[int],
+        negative_region_indices: List[int],
+        layer: Optional[int] = None
+    ) -> ARMControlVector:
+        """
+        Compute a steering vector from positive and negative regions in the manifold.
+
+        Args:
+            positive_region_indices: Indices of seeds representing positive behavior
+            negative_region_indices: Indices of seeds representing negative behavior
+            layer: Layer to compute steering for (defaults to config.layer_to_probe)
+
+        Returns:
+            Control vector for steering
+        """
+        if not hasattr(self, '_last_results') or self._last_results is None:
+            raise ValueError("Must run map_latent_manifold() first to have manifold data")
+
+        if layer is None:
+            layer = self.config.layer_to_probe
+
+        computer = self.create_control_vector_computer()
+
+        # Get positive and negative prompts from the manifold data
+        manifold_data = self._last_results
+        all_prompts = manifold_data.get('prompts', [])
+
+        positive_prompts = [all_prompts[i] for i in positive_region_indices if i < len(all_prompts)]
+        negative_prompts = [all_prompts[i] for i in negative_region_indices if i < len(all_prompts)]
+
+        if not positive_prompts or not negative_prompts:
+            raise ValueError("Need at least one positive and one negative example")
+
+        return computer.compute_control_vector(positive_prompts, negative_prompts, layer)
+
+    def steer_generation_toward_signature(
+        self,
+        prompt: str,
+        target_signature: np.ndarray,
+        max_length: int = 50,
+        temperature: float = 0.8,
+        steering_strength: float = 1.0
+    ) -> str:
+        """
+        Generate text steered toward a target resonance signature.
+
+        Args:
+            prompt: Starting prompt
+            target_signature: Target resonance signature
+            max_length: Maximum tokens to generate
+            temperature: Generation temperature
+            steering_strength: How strongly to apply steering (0 = no steering)
+
+        Returns:
+            Generated text
+        """
+        if not hasattr(self, '_last_results') or self._last_results is None:
+            raise ValueError("Must run map_latent_manifold() first to have manifold data")
+
+        generator = self.create_controlled_generator()
+        return generator.generate_with_manifold_steering(
+            prompt=prompt,
+            target_signature=target_signature,
+            manifold_data=self._last_results,
+            max_length=max_length,
+            temperature=temperature,
+            steering_strength=steering_strength
+        )
+
+
+
+================================================
+FILE: arm_library/core/probe_generator.py
+================================================
+"""
+Probe generation for ARM - creates directional perturbations around seed points.
+"""
+
+import numpy as np
+from typing import List, Tuple, Optional, Dict, Any
+import numpy.typing as npt
+
+from ..utils.config import ARMConfig
+
+
+class ProbeGenerator:
+    """Generates directional probes for ARM analysis."""
+
+    def __init__(self, config: ARMConfig):
+        self.config = config
+        self.rng = np.random.default_rng(config.random_seed)
+
+    def sample_probes_for_hidden(
+        self,
+        hidden_vec: npt.NDArray[np.float32],
+        k: Optional[int] = None,
+        eps: Optional[float] = None
+    ) -> npt.NDArray[np.float32]:
+        """
+        Sample directional probes around a hidden state vector.
+
+        Args:
+            hidden_vec: Hidden state array, shape (seq_len, d_model)
+            k: Number of probes to generate (default: config.probes_per_seed)
+            eps: Perturbation magnitude (default: config.eps)
+
+        Returns:
+            Probe deltas, shape (k, d_model)
+        """
+        k = k or self.config.probes_per_seed
+        eps = eps or self.config.eps
+
+        # Pool hidden state to single vector for direction construction
+        pooled = hidden_vec.mean(axis=0)  # (d_model,)
+        d = pooled.shape[0]
+
+        # Sample isotropic Gaussian directions
+        dirs = self.rng.normal(size=(k, d))
+        dirs = dirs / (np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-12)
+
+        # Scale by perturbation magnitude relative to hidden vector norm
+        hidden_norm = np.linalg.norm(pooled) + 1e-12
+        scale = eps * hidden_norm
+        dirs = dirs * scale
+
+        return dirs.astype(np.float32)
+
+    def expand_delta_to_sequence(
+        self,
+        delta_vec: npt.NDArray[np.float32],
+        seq_len: int
+    ) -> npt.NDArray[np.float32]:
+        """
+        Expand a pooled delta vector to apply across all sequence positions.
+
+        Args:
+            delta_vec: Delta vector, shape (d_model,)
+            seq_len: Sequence length
+
+        Returns:
+            Expanded deltas, shape (seq_len, d_model)
+        """
+        return np.tile(delta_vec[None, :], (seq_len, 1)).astype(np.float32)
+
+    def build_probe_path(
+        self,
+        hidden_base: npt.NDArray[np.float32],
+        dir_vec: npt.NDArray[np.float32],
+        steps: Optional[int] = None,
+        tau: float = 1.0
+    ) -> Tuple[List[npt.NDArray[np.float32]], npt.NDArray[np.float32]]:
+        """
+        Build a probe path along a direction.
+
+        Args:
+            hidden_base: Base hidden state, shape (seq_len, d_model)
+            dir_vec: Direction vector, shape (d_model,)
+            steps: Number of steps (default: config.steps_per_probe)
+            tau: Scaling factor for step range [-tau, tau]
+
+        Returns:
+            Tuple of (path_hidden_states, step_values)
+        """
+        steps = steps or self.config.steps_per_probe
+        seq_len = hidden_base.shape[0]
+
+        # Expand direction across sequence positions
+        dir_seq = self.expand_delta_to_sequence(dir_vec, seq_len)
+
+        # Generate step values
+        ts = np.linspace(-tau, tau, steps, dtype=np.float32)
+
+        # Build perturbed hidden states
+        path = [hidden_base + (t * dir_seq) for t in ts]
+
+        return path, ts
+
+    def generate_probe_batch(
+        self,
+        hidden_base: npt.NDArray[np.float32],
+        k: Optional[int] = None,
+        steps: Optional[int] = None,
+        eps: Optional[float] = None,
+        tau: float = 1.0
+    ) -> Tuple[List[List[npt.NDArray[np.float32]]], npt.NDArray[np.float32]]:
+        """
+        Generate a batch of probe paths around a base hidden state.
+
+        Args:
+            hidden_base: Base hidden state, shape (seq_len, d_model)
+            k: Number of probes (default: config.probes_per_seed)
+            steps: Steps per probe (default: config.steps_per_probe)
+            eps: Perturbation magnitude (default: config.eps)
+            tau: Step scaling factor
+
+        Returns:
+            Tuple of (probe_paths, probe_directions)
+                - probe_paths: List of paths, each path is list of hidden states
+                - probe_directions: Directions used, shape (k, d_model)
+        """
+        k = k or self.config.probes_per_seed
+        steps = steps or self.config.steps_per_probe
+        eps = eps or self.config.eps
+
+        # Generate probe directions
+        probe_directions = self.sample_probes_for_hidden(hidden_base, k=k, eps=eps)
+
+        # Build paths for each direction
+        probe_paths = []
+        for j in range(k):
+            path, _ = self.build_probe_path(hidden_base, probe_directions[j], steps=steps, tau=tau)
+            probe_paths.append(path)
+
+        return probe_paths, probe_directions
+
+
+
+================================================
+FILE: arm_library/core/resonance_analyzer.py
+================================================
+"""
+Resonance analysis for ARM - spectral decomposition of activation matrices.
+"""
+
+import numpy as np
+from typing import Dict, Any, Optional, Tuple, List
+import numpy.typing as npt
+from sklearn.decomposition import TruncatedSVD
+
+from ..utils.config import ARMConfig
+
+
+class ResonanceAnalyzer:
+    """Analyzes resonance patterns in activation matrices using spectral methods."""
+
+    def __init__(self, config: ARMConfig):
+        self.config = config
+
+    def resonance_signature(
+        self,
+        activation_matrix: npt.NDArray[np.float32],
+        n_modes: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Compute resonance signature from activation matrix using SVD.
+
+        Args:
+            activation_matrix: Activation matrix, shape (n_samples, n_features)
+            n_modes: Number of modes to keep (default: config.n_modes)
+
+        Returns:
+            Dictionary containing resonance metrics
+        """
+        n_modes = n_modes or self.config.n_modes
+
+        # Center the activation matrix
+        A0 = activation_matrix - activation_matrix.mean(axis=0, keepdims=True)
+
+        # Compute SVD
+        U, s, Vt = np.linalg.svd(A0, full_matrices=False)
+
+        # Ensure no zero singular values
+        s = np.maximum(s, 1e-12)
+
+        # Normalized singular values
+        s_norm = s / s.sum()
+
+        # Shannon entropy of singular value distribution
+        entropy = -np.sum(s_norm * np.log(s_norm + 1e-12))
+
+        # Participation ratio (measure of mode concentration)
+        pr = (s**2).sum()**2 / (np.sum(s**4) + 1e-12)
+
+        # Participation ratio normalized to [0, 1] range
+        # For uniform distribution: PR = n_modes, for single mode: PR = 1
+        n_total_modes = len(s)
+        pr_normalized = (pr - 1) / (n_total_modes - 1) if n_total_modes > 1 else 1.0
+
+        return {
+            "singular_values": s[:n_modes].astype(np.float32),
+            "s_norm": s_norm[:n_modes].astype(np.float32),
+            "entropy": float(entropy),
+            "participation_ratio": float(pr),
+            "participation_ratio_normalized": float(pr_normalized),
+            "top_singular_vectors": Vt[:n_modes].astype(np.float32),  # shape (n_modes, n_features)
+            "explained_variance_ratio": (s[:n_modes]**2 / (s**2).sum()).astype(np.float32),
+        }
+
+    def batch_resonance_signatures(
+        self,
+        activation_matrices: List[npt.NDArray[np.float32]],
+        n_modes: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Compute resonance signatures for multiple activation matrices.
+
+        Args:
+            activation_matrices: List of activation matrices
+            n_modes: Number of modes to keep
+
+        Returns:
+            List of resonance signatures
+        """
+        return [self.resonance_signature(A, n_modes) for A in activation_matrices]
+
+    def compare_resonance_signatures(
+        self,
+        sig1: Dict[str, Any],
+        sig2: Dict[str, Any],
+        metric: str = "cosine"
+    ) -> float:
+        """
+        Compare two resonance signatures.
+
+        Args:
+            sig1: First resonance signature
+            sig2: Second resonance signature
+            metric: Comparison metric ("cosine", "euclidean", "entropy_diff")
+
+        Returns:
+            Similarity/distance score
+        """
+        if metric == "cosine":
+            # Cosine similarity between top singular vectors
+            v1 = sig1["top_singular_vectors"].flatten()
+            v2 = sig2["top_singular_vectors"].flatten()
+            dot_product = np.dot(v1, v2)
+            norm1 = np.linalg.norm(v1)
+            norm2 = np.linalg.norm(v2)
+            return dot_product / (norm1 * norm2 + 1e-12)
+
+        elif metric == "euclidean":
+            # Euclidean distance between normalized singular values
+            return np.linalg.norm(sig1["s_norm"] - sig2["s_norm"])
+
+        elif metric == "entropy_diff":
+            # Absolute difference in entropy
+            return abs(sig1["entropy"] - sig2["entropy"])
+
+        else:
+            raise ValueError(f"Unknown metric: {metric}")
+
+    def detect_resonance_modes(
+        self,
+        activation_matrix: npt.NDArray[np.float32],
+        threshold: float = 0.1
+    ) -> Dict[str, Any]:
+        """
+        Detect significant resonance modes based on explained variance.
+
+        Args:
+            activation_matrix: Activation matrix
+            threshold: Minimum explained variance ratio for significant modes
+
+        Returns:
+            Dictionary with mode detection results
+        """
+        sig = self.resonance_signature(activation_matrix)
+
+        explained_var = sig["explained_variance_ratio"]
+        significant_modes = np.where(explained_var >= threshold)[0]
+
+        return {
+            "n_significant_modes": len(significant_modes),
+            "significant_mode_indices": significant_modes.tolist(),
+            "significant_explained_var": explained_var[significant_modes].tolist(),
+            "cumulative_explained_var": np.cumsum(explained_var).tolist(),
+        }
+
+
+
+================================================
+FILE: arm_library/core/steering.py
+================================================
+#!/usr/bin/env python3
+"""
+ARM Steering Module
+
+Implements control vector-based steering for ARM, inspired by Representation Engineering (RepE).
+Provides functionality to compute control vectors from positive/negative examples and apply
+them during text generation.
+"""
+
+import torch
+import numpy as np
+from typing import List, Dict, Any, Optional, Tuple, Union
+from ..interfaces.model_interface import TransformerModelInterface
+
+
+class ARMControlVector:
+    """Represents a control vector for steering model behavior."""
+
+    def __init__(self, direction: torch.Tensor, layer: int, coefficient: float = 1.0):
+        """
+        Initialize a control vector.
+
+        Args:
+            direction: The steering direction vector (shape: [hidden_size])
+            layer: The transformer layer to apply steering at
+            coefficient: Scaling coefficient for the control vector
+        """
+        self.direction = direction
+        self.layer = layer
+        self.coefficient = coefficient
+
+    def apply(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the control vector to hidden states.
+
+        Args:
+            hidden_states: Hidden states tensor (shape: [batch_size, seq_len, hidden_size])
+
+        Returns:
+            Modified hidden states with control vector applied
+        """
+        # Add the control vector to all positions in the sequence
+        steering_vector = self.direction.unsqueeze(0).unsqueeze(0) * self.coefficient
+        return hidden_states + steering_vector
+
+
+class ARMControlVectorComputer:
+    """Computes control vectors from positive and negative examples."""
+
+    def __init__(self, model_interface: TransformerModelInterface):
+        """
+        Initialize the control vector computer.
+
+        Args:
+            model_interface: Interface to the transformer model
+        """
+        self.model_interface = model_interface
+
+    def compute_control_vector(
+        self,
+        positive_prompts: List[str],
+        negative_prompts: List[str],
+        layer: int,
+        normalize: bool = True
+    ) -> ARMControlVector:
+        """
+        Compute a control vector from positive and negative examples.
+
+        This follows the RepE approach: control_vector = mean(pos_activations) - mean(neg_activations)
+
+        Args:
+            positive_prompts: Prompts that exemplify the desired behavior
+            negative_prompts: Prompts that exemplify the undesired behavior
+            layer: Transformer layer to extract activations from
+            normalize: Whether to normalize the control vector
+
+        Returns:
+            ARMControlVector for steering
+        """
+        # Get activations for positive prompts
+        pos_activations = []
+        for prompt in positive_prompts:
+            hidden = self.model_interface.get_hidden_at_layer(prompt, layer)
+            # Use the mean activation across the sequence (excluding padding if any)
+            pos_activations.append(hidden.mean(dim=0))
+
+        # Get activations for negative prompts
+        neg_activations = []
+        for prompt in negative_prompts:
+            hidden = self.model_interface.get_hidden_at_layer(prompt, layer)
+            # Use the mean activation across the sequence (excluding padding if any)
+            neg_activations.append(hidden.mean(dim=0))
+
+        # Compute means
+        pos_mean = torch.stack(pos_activations).mean(dim=0)
+        neg_mean = torch.stack(neg_activations).mean(dim=0)
+
+        # Compute control vector: positive - negative
+        control_direction = pos_mean - neg_mean
+
+        # Normalize if requested
+        if normalize:
+            control_direction = control_direction / (torch.norm(control_direction) + 1e-8)
+
+        return ARMControlVector(control_direction, layer)
+
+    def compute_manifold_control_vector(
+        self,
+        target_signature: np.ndarray,
+        layer: int,
+        manifold_data: Dict[str, Any],
+        normalize: bool = True
+    ) -> ARMControlVector:
+        """
+        Compute a control vector that steers toward a specific resonance signature
+        within a discovered manifold.
+
+        Args:
+            target_signature: Target resonance signature to steer toward
+            layer: Transformer layer
+            manifold_data: Results from ARM manifold analysis
+            normalize: Whether to normalize the control vector
+
+        Returns:
+            ARMControlVector for manifold-based steering
+        """
+        # Find the seed with the closest resonance signature to the target
+        seed_analyses = manifold_data['seed_analyses']
+        best_seed_idx = None
+        best_distance = float('inf')
+
+        for i, analysis in enumerate(seed_analyses):
+            signature = analysis['resonance_signature']['s_norm']
+            # Compare signatures (truncate to same length if needed)
+            min_len = min(len(signature), len(target_signature))
+            distance = np.linalg.norm(signature[:min_len] - target_signature[:min_len])
+            if distance < best_distance:
+                best_distance = distance
+                best_seed_idx = i
+
+        if best_seed_idx is None:
+            raise ValueError("No suitable seed found for manifold steering")
+
+        # Use the descriptor of the best matching seed as the control direction
+        descriptors = manifold_data['descriptors']
+        control_direction = torch.tensor(descriptors[best_seed_idx], dtype=torch.float32)
+
+        if normalize:
+            control_direction = control_direction / (torch.norm(control_direction) + 1e-8)
+
+        return ARMControlVector(control_direction, layer)
+
+
+class ARMControlledGenerator:
+    """Generates text with ARM control vector steering."""
+
+    def __init__(self, model_interface: TransformerModelInterface):
+        """
+        Initialize the controlled generator.
+
+        Args:
+            model_interface: Interface to the transformer model
+        """
+        self.model_interface = model_interface
+        self.active_controls = {}  # layer -> ARMControlVector
+
+    def set_control(self, control_vector: ARMControlVector):
+        """
+        Set a control vector for steering.
+
+        Args:
+            control_vector: The control vector to apply
+        """
+        self.active_controls[control_vector.layer] = control_vector
+
+    def clear_controls(self):
+        """Clear all active control vectors."""
+        self.active_controls.clear()
+
+    def generate_with_steering(
+        self,
+        prompt: str,
+        max_length: int = 50,
+        temperature: float = 1.0,
+        do_sample: bool = True,
+        **generation_kwargs
+    ) -> str:
+        """
+        Generate text with active control vectors applied.
+
+        Args:
+            prompt: Input prompt
+            max_length: Maximum length of generated text
+            temperature: Sampling temperature
+            do_sample: Whether to use sampling
+            **generation_kwargs: Additional generation arguments
+
+        Returns:
+            Generated text
+        """
+        # Encode the prompt
+        input_ids, attention_mask = self.model_interface.encode_prompt(prompt)
+
+        # Set up steering if we have control vectors
+        if self.active_controls:
+            # We'll need to modify the model's forward pass to apply controls
+            # For now, implement a simple approach by adding controls to the initial hidden state
+            hidden = self.model_interface.build_initial_hidden(input_ids)
+
+            # Apply any controls for the first layer
+            if 0 in self.active_controls:
+                hidden = self.active_controls[0].apply(hidden)
+
+            # Generate with the modified initial hidden state
+            # This is a simplified approach - a more sophisticated implementation
+            # would hook into the model's forward pass at each layer
+            outputs = self.model_interface.model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_length=input_ids.shape[1] + max_length,
+                temperature=temperature,
+                do_sample=do_sample,
+                pad_token_id=self.model_interface.tokenizer.pad_token_id,
+                eos_token_id=self.model_interface.tokenizer.eos_token_id,
+                **generation_kwargs
+            )
+        else:
+            # Normal generation without steering
+            outputs = self.model_interface.model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_length=input_ids.shape[1] + max_length,
+                temperature=temperature,
+                do_sample=do_sample,
+                pad_token_id=self.model_interface.tokenizer.pad_token_id,
+                eos_token_id=self.model_interface.tokenizer.eos_token_id,
+                **generation_kwargs
+            )
+
+        # Decode the generated text
+        generated_text = self.model_interface.tokenizer.decode(
+            outputs[0][input_ids.shape[1]:],
+            skip_special_tokens=True
+        ).strip()
+
+        return generated_text
+
+    def generate_with_manifold_steering(
+        self,
+        prompt: str,
+        target_signature: np.ndarray,
+        manifold_data: Dict[str, Any],
+        max_length: int = 50,
+        temperature: float = 1.0,
+        steering_strength: float = 1.0,
+        **generation_kwargs
+    ) -> str:
+        """
+        Generate text with manifold-based steering toward a target resonance signature.
+
+        Args:
+            prompt: Input prompt
+            target_signature: Target resonance signature
+            manifold_data: ARM manifold analysis results
+            max_length: Maximum length of generated text
+            temperature: Sampling temperature
+            steering_strength: Strength of the steering (0 = no steering)
+            **generation_kwargs: Additional generation arguments
+
+        Returns:
+            Generated text with manifold steering applied
+        """
+        if steering_strength == 0:
+            # No steering requested
+            return self.generate_with_steering(prompt, max_length, temperature, **generation_kwargs)
+
+        # Compute control vector for manifold steering
+        computer = ARMControlVectorComputer(self.model_interface)
+        layer = manifold_data.get('layer_to_probe', 6)  # Default to layer 6
+        control_vector = computer.compute_manifold_control_vector(
+            target_signature, layer, manifold_data
+        )
+        control_vector.coefficient = steering_strength
+
+        # Apply the control and generate
+        self.set_control(control_vector)
+        try:
+            result = self.generate_with_steering(prompt, max_length, temperature, **generation_kwargs)
+        finally:
+            self.clear_controls()
+
+        return result
+
+
+
+
+================================================
+FILE: arm_library/core/topology_mapper.py
+================================================
+"""
+Topology mapping for ARM - persistent homology analysis of activation manifolds.
+"""
+
+import numpy as np
+from typing import Dict, Any, List, Optional, Tuple
+import numpy.typing as npt
+
+try:
+    from ripser import ripser
+    RIPSER_AVAILABLE = True
+except ImportError:
+    RIPSER_AVAILABLE = False
+
+try:
+    from sklearn.metrics import pairwise_distances
+    from sklearn.neighbors import kneighbors_graph
+    from sklearn.manifold import spectral_embedding
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+
+from ..utils.config import ARMConfig
+
+
+class TopologyMapper:
+    """Maps topological structure of activation manifolds using persistent homology."""
+
+    def __init__(self, config: ARMConfig):
+        self.config = config
+
+        if not RIPSER_AVAILABLE:
+            raise ImportError("ripser package required for topology analysis. Install with: pip install ripser")
+
+        if not SKLEARN_AVAILABLE:
+            raise ImportError("scikit-learn required for topology analysis.")
+
+    def local_persistence(
+        self,
+        activation_matrix: npt.NDArray[np.float32],
+        maxdim: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Compute persistent homology for local activation neighborhood.
+
+        Args:
+            activation_matrix: Activation points, shape (n_points, n_features)
+            maxdim: Maximum homology dimension (default: config.max_homology_dim)
+
+        Returns:
+            Dictionary containing persistence diagrams and features
+        """
+        maxdim = maxdim or self.config.max_homology_dim
+
+        # Compute pairwise distances
+        D = pairwise_distances(activation_matrix, metric='euclidean')
+
+        # Compute persistent homology
+        result = ripser(D, distance_matrix=True, maxdim=maxdim)
+
+        # Extract persistence diagrams
+        diagrams = result['dgms']
+
+        # Compute persistence features
+        persistence_features = {}
+        for dim in range(len(diagrams)):
+            if dim < len(diagrams):
+                diagram = diagrams[dim]
+                if len(diagram) > 0:
+                    # Remove infinite persistence points for finite features
+                    finite_points = diagram[np.isfinite(diagram[:, 1])]
+                    if len(finite_points) > 0:
+                        persistences = finite_points[:, 1] - finite_points[:, 0]
+                        persistence_features[f'h{dim}_features'] = {
+                            'birth_death_pairs': finite_points.tolist(),
+                            'persistences': persistences.tolist(),
+                            'max_persistence': float(np.max(persistences)),
+                            'mean_persistence': float(np.mean(persistences)),
+                            'n_features': len(finite_points),
+                        }
+
+        return {
+            'diagrams': [diag.tolist() for diag in diagrams],
+            'persistence_features': persistence_features,
+            'n_points': len(activation_matrix),
+            'n_features': activation_matrix.shape[1],
+        }
+
+    def build_resonance_graph(
+        self,
+        resonance_signatures: List[Dict[str, Any]],
+        n_neighbors: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Build k-nearest neighbor graph based on resonance signature similarity.
+
+        Args:
+            resonance_signatures: List of resonance signatures
+            n_neighbors: Number of neighbors for kNN graph
+
+        Returns:
+            Dictionary containing graph structure and embeddings
+        """
+        n_neighbors = n_neighbors or self.config.topology_neighbors
+        n_samples = len(resonance_signatures)
+
+        # Adjust n_neighbors if we don't have enough samples
+        effective_neighbors = min(n_neighbors, n_samples - 1)
+        if effective_neighbors < 1:
+            effective_neighbors = 1
+
+        # Extract feature vectors from resonance signatures
+        feature_vectors = []
+        for sig in resonance_signatures:
+            # Combine normalized singular values and entropy
+            features = np.concatenate([
+                sig['s_norm'],
+                [sig['entropy'], sig['participation_ratio_normalized']]
+            ])
+            feature_vectors.append(features)
+
+        X = np.array(feature_vectors)
+
+        # Build kNN graph with adjusted neighbors
+        W = kneighbors_graph(X, n_neighbors=effective_neighbors, mode='distance', include_self=False)
+        W = W.toarray()  # Convert to dense matrix
+
+        # Compute spectral embedding for global coordinates
+        try:
+            embedding = spectral_embedding(W, n_components=3, random_state=self.config.random_seed)
+        except:
+            # Fallback to random embedding if spectral embedding fails
+            embedding = np.random.randn(len(X), 3)
+
+        return {
+            'adjacency_matrix': W,
+            'feature_vectors': X,
+            'spectral_embedding': embedding,
+            'n_nodes': len(X),
+            'effective_neighbors': effective_neighbors,
+        }
+
+    def detect_attractor_basins(
+        self,
+        resonance_signatures: List[Dict[str, Any]],
+        graph_data: Dict[str, Any],
+        n_clusters: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Detect attractor basins using community detection on resonance graph.
+
+        Args:
+            resonance_signatures: List of resonance signatures
+            graph_data: Graph structure from build_resonance_graph
+            n_clusters: Number of clusters to find (optional)
+
+        Returns:
+            Dictionary with clustering results
+        """
+        try:
+            from sklearn.cluster import SpectralClustering
+        except ImportError:
+            raise ImportError("scikit-learn required for clustering analysis.")
+
+        X = graph_data['feature_vectors']
+        n_samples = len(X)
+
+        # Handle small datasets
+        if n_samples < 2:
+            return {
+                'cluster_labels': [0] * n_samples,
+                'n_clusters': 1,
+                'centroids': [X[0].tolist()] if n_samples > 0 else [],
+                'cluster_sizes': [n_samples],
+                'note': 'Single sample dataset'
+            }
+
+        # Determine number of clusters
+        if n_clusters is None:
+            # For small datasets, limit cluster count
+            max_clusters = min(5, n_samples)
+            n_clusters = min(3, max_clusters)  # Start conservative
+
+            # Try to use silhouette score for small datasets
+            if n_samples >= 3:
+                from sklearn.metrics import silhouette_score
+                best_score = -1
+                best_n_clusters = n_clusters
+
+                for n in range(2, min(max_clusters + 1, n_samples)):
+                    try:
+                        clustering = SpectralClustering(
+                            n_clusters=n,
+                            affinity='nearest_neighbors',
+                            n_neighbors=min(5, n_samples - 1),  # Limit neighbors
+                            random_state=self.config.random_seed
+                        )
+                        labels = clustering.fit_predict(X)
+                        if len(np.unique(labels)) > 1:
+                            score = silhouette_score(X, labels)
+                            if score > best_score:
+                                best_score = score
+                                best_n_clusters = n
+                    except:
+                        continue
+
+                n_clusters = best_n_clusters
+
+        # Ensure n_clusters doesn't exceed sample count
+        n_clusters = min(n_clusters, n_samples)
+
+        # Final clustering with robust parameters
+        try:
+            clustering = SpectralClustering(
+                n_clusters=n_clusters,
+                affinity='nearest_neighbors',
+                n_neighbors=min(5, n_samples - 1),
+                random_state=self.config.random_seed
+            )
+            labels = clustering.fit_predict(X)
+        except:
+            # Fallback to simple clustering for very small datasets
+            from sklearn.cluster import KMeans
+            kmeans = KMeans(n_clusters=n_clusters, random_state=self.config.random_seed, n_init=10)
+            labels = kmeans.fit_predict(X)
+
+        # Compute cluster centroids
+        centroids = []
+        for i in range(n_clusters):
+            mask = labels == i
+            if np.any(mask):
+                centroids.append(np.mean(X[mask], axis=0))
+
+        return {
+            'cluster_labels': labels.tolist(),
+            'n_clusters': n_clusters,
+            'centroids': np.array(centroids).tolist() if centroids else [],
+            'cluster_sizes': [np.sum(labels == i) for i in range(n_clusters)],
+        }
+
+    def compute_topological_descriptor(
+        self,
+        resonance_signature: Dict[str, Any],
+        persistence_data: Dict[str, Any]
+    ) -> npt.NDArray[np.float32]:
+        """
+        Combine resonance and topological features into a unified descriptor.
+
+        Args:
+            resonance_signature: Resonance analysis results
+            persistence_data: Persistence homology results
+
+        Returns:
+            Combined descriptor vector
+        """
+        # Extract resonance features
+        resonance_features = np.concatenate([
+            resonance_signature['s_norm'],
+            [resonance_signature['entropy'], resonance_signature['participation_ratio_normalized']]
+        ])
+
+        # Extract topological features
+        topo_features = []
+        for dim in range(self.config.max_homology_dim + 1):
+            key = f'h{dim}_features'
+            if key in persistence_data['persistence_features']:
+                features = persistence_data['persistence_features'][key]
+                topo_features.extend([
+                    features['max_persistence'],
+                    features['mean_persistence'],
+                    features['n_features']
+                ])
+            else:
+                # Pad with zeros if no features in this dimension
+                topo_features.extend([0.0, 0.0, 0.0])
+
+        # Combine features
+        descriptor = np.concatenate([resonance_features, topo_features])
+
+        return descriptor.astype(np.float32)
+
+
