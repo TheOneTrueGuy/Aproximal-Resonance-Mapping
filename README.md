@@ -15,6 +15,10 @@ Swap out your one-dimensional Control Vectors for rich, poly-dimensional Control
 
 Instructions:
 Clone the repo
+
 make and activate a venv
+
 pip install -r requirements.txt
+
 python launch_interface.py
+
