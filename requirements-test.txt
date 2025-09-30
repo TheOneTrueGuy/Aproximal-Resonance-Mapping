@@ -20,5 +20,8 @@ umap-learn>=0.5.0
 # System monitoring
 psutil>=5.9.0
 
+# Quantization support (optional but recommended for memory savings)
+bitsandbytes>=0.41.0
+
 # Web interface
 gradio>=4.0.0

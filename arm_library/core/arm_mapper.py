@@ -24,7 +24,9 @@ class ARMMapper:
         # Initialize components
         self.model_interface = TransformerModelInterface(ModelConfig(
             model_name=config.model_name,
-            device=config.device
+            device=config.device,
+            load_in_8bit=config.load_in_8bit,
+            load_in_4bit=config.load_in_4bit
         ))
 
         self.probe_generator = ProbeGenerator(config)

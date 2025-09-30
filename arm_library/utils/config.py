@@ -14,6 +14,10 @@ class ARMConfig:
     # Model settings
     model_name: str = "distilgpt2"
     device: Optional[torch.device] = None
+    
+    # Quantization settings (memory optimization)
+    load_in_8bit: bool = False  # Use 8-bit quantization (4-8x memory reduction)
+    load_in_4bit: bool = False  # Use 4-bit quantization (even more reduction)
 
     # ARM hyperparameters
     n_seeds: int = 200
@@ -49,6 +53,8 @@ class ARMConfig:
         return {
             'model_name': self.model_name,
             'device': str(self.device) if self.device else None,
+            'load_in_8bit': self.load_in_8bit,
+            'load_in_4bit': self.load_in_4bit,
             'n_seeds': self.n_seeds,
             'probes_per_seed': self.probes_per_seed,
             'steps_per_probe': self.steps_per_probe,
@@ -71,6 +77,8 @@ class ModelConfig:
     device: Optional[torch.device] = None
     output_hidden_states: bool = True
     torch_dtype: Optional[torch.dtype] = None
+    load_in_8bit: bool = False  # Use 8-bit quantization
+    load_in_4bit: bool = False  # Use 4-bit quantization
 
     def __post_init__(self):
         """Set device if not provided."""

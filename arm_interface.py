@@ -96,7 +96,8 @@ class ARMInterface:
         self,
         ram_gb: float,
         vram_gb: float,
-        use_gpu: bool
+        use_gpu: bool,
+        quantization_mode: str = "none"
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Filter HuggingFace models based on system resources.
@@ -114,6 +115,17 @@ class ARMInterface:
             safe_ram = ram_gb * 0.8
             safe_vram = vram_gb * 0.8 if use_gpu else 0
             
+            # Apply quantization reduction factor
+            if quantization_mode == "8bit":
+                quant_factor = 0.25  # 8-bit uses ~25% of original size (4x reduction)
+                quant_label = " [8-bit]"
+            elif quantization_mode == "4bit":
+                quant_factor = 0.125  # 4-bit uses ~12.5% of original size (8x reduction)
+                quant_label = " [4-bit]"
+            else:
+                quant_factor = 1.0  # No quantization
+                quant_label = ""
+            
             # Model requires: model_size + activation_memory + overhead
             # Rule of thumb: model needs ~1.5x its size for inference
             # Add extra overhead for ARM analysis (probes, activations)
@@ -123,7 +135,7 @@ class ARMInterface:
             incompatible_count = 0
             
             for model_id, info in self.known_models.items():
-                model_size = info["size_gb"]
+                model_size = info["size_gb"] * quant_factor  # Apply quantization
                 required_memory = model_size * memory_multiplier
                 
                 # Check if it fits
@@ -135,14 +147,14 @@ class ARMInterface:
                     
                     if is_compatible:
                         location = "🎮 GPU" if fits_gpu else "💾 CPU"
-                        display_name = f"{model_id} [{info['params']}, {model_size:.1f}GB] {location}"
+                        display_name = f"{model_id} [{info['params']}, {model_size:.1f}GB{quant_label}] {location}"
                         compatible_models.append((model_id, display_name, model_size))
                     else:
                         incompatible_count += 1
                 else:
                     # CPU only
                     if required_memory <= safe_ram:
-                        display_name = f"{model_id} [{info['params']}, {model_size:.1f}GB] 💾 CPU"
+                        display_name = f"{model_id} [{info['params']}, {model_size:.1f}GB{quant_label}] 💾 CPU"
                         compatible_models.append((model_id, display_name, model_size))
                     else:
                         incompatible_count += 1
@@ -171,6 +183,8 @@ class ARMInterface:
             
             # Create status message
             status = f"✅ Found {len(compatible_models)} compatible model(s)\n"
+            if quantization_mode != "none":
+                status += f"   Quantization: {quantization_mode} ({int(1/quant_factor)}x memory reduction)\n"
             status += f"   RAM: {ram_gb}GB (using {safe_ram:.1f}GB safely)\n"
             if use_gpu:
                 status += f"   VRAM: {vram_gb}GB (using {safe_vram:.1f}GB safely)\n"
@@ -305,7 +319,8 @@ class ARMInterface:
         layer_to_probe: int,
         n_modes: int,
         temperature: float,
-        max_tokens: int
+        max_tokens: int,
+        quantization_mode: str = "none"
     ) -> ARMConfig:
         """Create ARM config from interface inputs."""
         return ARMConfig(
@@ -316,6 +331,8 @@ class ARMInterface:
             eps=eps,
             layer_to_probe=layer_to_probe,
             n_modes=n_modes,
+            load_in_8bit=(quantization_mode == "8bit"),
+            load_in_4bit=(quantization_mode == "4bit"),
             random_seed=42,  # For reproducibility
         )
 
@@ -329,6 +346,7 @@ class ARMInterface:
         eps: float,
         layer_to_probe: int,
         n_modes: int,
+        quantization_mode: str,
         progress=gr.Progress()
     ) -> Tuple[str, str, str, str, str]:
         """Run ARM analysis on input prompts."""
@@ -353,7 +371,7 @@ class ARMInterface:
             # Create configuration
             config = self.create_config_from_inputs(
                 actual_model_path, n_seeds, probes_per_seed, steps_per_probe,
-                eps, layer_to_probe, n_modes, 1.0, 50
+                eps, layer_to_probe, n_modes, 1.0, 50, quantization_mode
             )
 
             progress(0.2, desc=f"📥 Loading model: {model_name}")
@@ -419,10 +437,11 @@ class ARMInterface:
             f"- **Modes:** {config.n_modes}",
             "",
             f"## Input Prompts ({len(prompts)})",
+            f"_(Index in brackets for steering)_",
         ]
 
-        for i, prompt in enumerate(prompts, 1):
-            summary_lines.append(f"{i}. `{prompt}`")
+        for i, prompt in enumerate(prompts):
+            summary_lines.append(f"{i+1}. **[Index {i}]** `{prompt}`")
 
         summary_lines.extend([
             "",
@@ -600,7 +619,7 @@ class ARMInterface:
         steering_mode: str,
         positive_indices: str = "",
         negative_indices: str = "",
-        target_signature_index: int = 0,
+        target_signature_indices: str = "0",
         steering_strength: float = 1.0
     ) -> str:
         """Generate text with optional ARM steering."""
@@ -647,23 +666,49 @@ class ARMInterface:
                 return f"🎯 Control vector steering (strength: {steering_strength}):\n\nPositive examples: {pos_indices}\nNegative examples: {neg_indices}\n\n{generated_text}"
 
             elif steering_mode == "manifold_signature":
-                # Steer toward a specific resonance signature
-                if target_signature_index >= len(self.current_results['seed_analyses']):
-                    return f"❌ Error: Target signature index {target_signature_index} is out of range (0-{len(self.current_results['seed_analyses'])-1})"
-
-                target_analysis = self.current_results['seed_analyses'][target_signature_index]
-                target_signature = target_analysis['resonance_signature']['s_norm']
+                # Steer toward blended resonance signature(s)
+                import numpy as np
+                
+                # Parse target indices
+                try:
+                    indices = [int(x.strip()) for x in target_signature_indices.split(',') if x.strip()]
+                except ValueError:
+                    return "❌ Error: Target signature indices must be comma-separated integers (e.g., '0,1,2')"
+                
+                if not indices:
+                    return "❌ Error: Need at least one target signature index"
+                
+                # Validate indices
+                max_index = len(self.current_results['seed_analyses']) - 1
+                for idx in indices:
+                    if idx < 0 or idx > max_index:
+                        return f"❌ Error: Index {idx} is out of range (0-{max_index})"
+                
+                # Collect and blend signatures
+                signatures = []
+                prompt_texts = []
+                for idx in indices:
+                    target_analysis = self.current_results['seed_analyses'][idx]
+                    signatures.append(target_analysis['resonance_signature']['s_norm'])
+                    prompt_texts.append(self.current_results['prompts'][idx])
+                
+                # Average signatures if multiple
+                if len(signatures) > 1:
+                    blended_signature = np.mean(signatures, axis=0)
+                    signature_desc = f"Blended from {len(indices)} signatures:\n" + "\n".join([f"  [{i}] {t}" for i, t in zip(indices, prompt_texts)])
+                else:
+                    blended_signature = signatures[0]
+                    signature_desc = f"Single signature from: [{indices[0]}] {prompt_texts[0]}"
 
                 generated_text = self.current_mapper.steer_generation_toward_signature(
                     prompt=target_prompt,
-                    target_signature=target_signature,
+                    target_signature=blended_signature,
                     max_length=max_tokens,
                     temperature=temperature,
                     steering_strength=steering_strength
                 )
 
-                prompt_text = self.current_results['prompts'][target_signature_index]
-                return f"🌀 Manifold signature steering (strength: {steering_strength}):\n\nTarget signature from: '{prompt_text}'\n\n{generated_text}"
+                return f"🌀 Manifold signature steering (strength: {steering_strength}):\n\n{signature_desc}\n\n{generated_text}"
 
             else:
                 return f"❌ Error: Unknown steering mode '{steering_mode}'"
@@ -1018,6 +1063,14 @@ def create_gradio_interface():
                             label="Resonance Modes",
                             info="Number of spectral modes to analyze"
                         )
+                    
+                    # Quantization settings
+                    quantization_mode = gr.Radio(
+                        choices=["none", "8bit", "4bit"],
+                        value="none",
+                        label="🔧 Quantization (Memory Saver)",
+                        info="8-bit=4x less RAM, 4-bit=8x less RAM (needs: pip install bitsandbytes)"
+                    )
 
                 with gr.Column(scale=2):
                     gr.Markdown("### Input Prompts")
@@ -1217,12 +1270,13 @@ def create_gradio_interface():
                     # Manifold signature steering options
                     with gr.Group(visible=False) as manifold_group:
                         gr.Markdown("**Manifold Signature Steering**")
-                        gr.Markdown("Steer toward the resonance signature of a specific seed:")
+                        gr.Markdown("Steer toward resonance signature(s). Multiple indices will be blended:")
 
-                        target_signature_index = gr.Slider(
-                            minimum=0, maximum=10, value=0, step=1,
-                            label="Target Signature Index",
-                            info="Index of the seed whose resonance signature to target"
+                        target_signature_indices = gr.Textbox(
+                            label="Target Signature Indices",
+                            placeholder="e.g., 0,1,2",
+                            value="0",
+                            info="Comma-separated indices of seeds whose signatures to blend and target"
                         )
 
                 with gr.Column():
@@ -1245,8 +1299,13 @@ def create_gradio_interface():
                     **None**: Standard generation without steering
 
                     **Control Vector**: Like RepE - steer away from negative examples toward positive examples
+                    - Use comma-separated indices (e.g., "0,1,2" for positive, "3,4" for negative)
+                    - Indices correspond to seed prompts (see Results tab for index mapping)
 
-                    **Manifold Signature**: Steer toward the resonance pattern of a specific analyzed prompt
+                    **Manifold Signature**: Steer toward resonance pattern(s) of analyzed prompt(s)
+                    - Use single index (e.g., "0") or multiple comma-separated (e.g., "0,1,2")
+                    - Multiple signatures are blended (averaged) together for combined steering
+                    - Check Results tab to see which index corresponds to which prompt
                     """)
 
         with gr.Tab("Help & Documentation"):
@@ -1279,33 +1338,61 @@ def create_gradio_interface():
             6. **Watch the Status box** for feedback during long operations
             7. Model downloads happen automatically on first use (can take 1-5 minutes)
 
+            ### Quantization (Memory Optimization) - NEW!
+            
+            **What is Quantization?**
+            Reduces model memory usage by using lower precision numbers:
+            - **8-bit**: 4x memory reduction (recommended)
+            - **4-bit**: 8x memory reduction (more aggressive)
+            - **none**: Full precision (no reduction)
+            
+            **How to Use:**
+            1. Select quantization mode in "🔧 Quantization" radio buttons
+            2. Install bitsandbytes: `pip install bitsandbytes`
+            3. Run analysis normally - model loads with reduced memory
+            
+            **Benefits:**
+            - Run larger models on your hardware
+            - Faster loading times
+            - Same ARM analysis quality
+            - No code changes needed
+            
+            **Example:**
+            - GPT-2 Medium (1.5GB) → 0.4GB with 8-bit
+            - Can fit GPT-J-6B (24GB) → 6GB with 4-bit!
+            
             ### Finding Compatible Models
             
-            **HuggingFace Model Browser (NEW!):**
+            **HuggingFace Model Browser:**
             1. Click "🤗 Browse Compatible HuggingFace Models" to expand
             2. Set your system specs:
                - **RAM**: Your system memory (default: 32GB)
                - **VRAM**: Your GPU memory (default: 4GB, or 0 for CPU-only)
                - **Use GPU**: Check if you want to use GPU when possible
+               - **Quantization**: Select quantization mode to see MORE compatible models!
             3. Click "🔍 Find Compatible Models"
             4. Compatible models will be added to the dropdown with:
                - Model name and organization
                - Parameter count (e.g., 124M, 1.3B)
-               - Size in GB
+               - Size in GB (adjusted for quantization if selected)
+               - Quantization mode [8-bit] or [4-bit] if enabled
                - Where it will run: 🎮 GPU or 💾 CPU
             
             **How It Works:**
             - Estimates memory requirements (model size × 2 for ARM operations)
+            - Applies quantization reduction (4x for 8-bit, 8x for 4-bit)
             - Filters models that fit in your available memory
             - Prioritizes GPU if available, falls back to CPU
             - Uses 80% of available memory for safety
             - Shows smallest models first
             
-            **Example Output:**
+            **Example Output (with 8-bit quantization):**
             ```
-            distilgpt2 [82M, 0.2GB] 🎮 GPU
-            gpt2 [124M, 0.5GB] 🎮 GPU
-            EleutherAI/pythia-410m [410M, 1.6GB] 💾 CPU
+            distilgpt2 [82M, 0.1GB [8-bit]] 🎮 GPU
+            gpt2 [124M, 0.1GB [8-bit]] 🎮 GPU
+            gpt2-medium [355M, 0.4GB [8-bit]] 🎮 GPU
+            gpt2-large [774M, 0.8GB [8-bit]] 💾 CPU
+            EleutherAI/pythia-1.4b [1.4B, 1.4GB [8-bit]] 💾 CPU
             ```
             
             ### Using Local Models
@@ -1362,7 +1449,7 @@ def create_gradio_interface():
         # Filter HuggingFace models by compatibility
         filter_models_btn.click(
             fn=arm_interface.filter_compatible_models,
-            inputs=[ram_input, vram_input, use_gpu_checkbox],
+            inputs=[ram_input, vram_input, use_gpu_checkbox, quantization_mode],
             outputs=[hf_filter_status, model_dropdown]
         )
 
@@ -1377,7 +1464,7 @@ def create_gradio_interface():
             fn=arm_interface.analyze_prompts,
             inputs=[
                 model_dropdown, prompts_input, n_seeds, probes_per_seed,
-                steps_per_probe, eps, layer_to_probe, n_modes
+                steps_per_probe, eps, layer_to_probe, n_modes, quantization_mode
             ],
             outputs=[status_output, summary_output, resonance_plot, topology_plot, descriptor_plot]
         )
@@ -1401,7 +1488,7 @@ def create_gradio_interface():
             fn=arm_interface.generate_steered_text,
             inputs=[
                 target_prompt, temperature, max_tokens, steering_mode,
-                positive_indices, negative_indices, target_signature_index, steering_strength
+                positive_indices, negative_indices, target_signature_indices, steering_strength
             ],
             outputs=[generated_output]
         )

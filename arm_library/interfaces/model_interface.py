@@ -22,11 +22,45 @@ class TransformerModelInterface:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        # Prepare model loading kwargs
+        model_kwargs = {
+            "output_hidden_states": config.output_hidden_states,
+        }
+        
+        # Add quantization configuration if requested
+        if config.load_in_8bit or config.load_in_4bit:
+            try:
+                from transformers import BitsAndBytesConfig
+                
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=config.load_in_8bit,
+                    load_in_4bit=config.load_in_4bit,
+                )
+                model_kwargs["quantization_config"] = quantization_config
+                model_kwargs["device_map"] = "auto"  # Required for quantization
+                
+                print(f"🔧 Loading model with {'8-bit' if config.load_in_8bit else '4-bit'} quantization...")
+                
+            except ImportError:
+                print("⚠️ Warning: bitsandbytes not installed. Falling back to full precision.")
+                print("   Install with: pip install bitsandbytes")
+                # Fall back to regular loading
+                if config.torch_dtype:
+                    model_kwargs["torch_dtype"] = config.torch_dtype
+        else:
+            # Regular loading without quantization
+            if config.torch_dtype:
+                model_kwargs["torch_dtype"] = config.torch_dtype
+
+        # Load the model
         self.model = AutoModelForCausalLM.from_pretrained(
             config.model_name,
-            output_hidden_states=config.output_hidden_states,
-            torch_dtype=config.torch_dtype,
-        ).to(config.device)
+            **model_kwargs
+        )
+        
+        # Move to device only if not using quantization (device_map handles it)
+        if not (config.load_in_8bit or config.load_in_4bit):
+            self.model = self.model.to(config.device)
 
         self.model.eval()
 
