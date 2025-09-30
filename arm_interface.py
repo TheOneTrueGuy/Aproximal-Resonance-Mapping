@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 from datetime import datetime
 import json
@@ -23,6 +23,7 @@ import pickle
 import base64
 import io
 import os
+import requests
 
 from arm_library.core.arm_mapper import ARMMapper
 from arm_library.utils.config import ARMConfig
@@ -44,11 +45,255 @@ class ARMInterface:
         self.current_results = None
         self.current_config = None
         self.current_prompts = None
+        self.model_directory = None  # User's local model directory
         self.available_models = [
             "distilgpt2",  # Small, fast
             "gpt2",        # Medium size
             "gpt2-medium", # Larger
         ]
+        self.local_models = []  # Models found in local directory
+        self.hf_compatible_models = []  # HuggingFace models compatible with system
+        self.is_processing = False  # Prevent concurrent operations
+        
+        # Curated list of known transformer models with size estimates (in GB)
+        self.known_models = {
+            # GPT-2 family
+            "distilgpt2": {"size_gb": 0.24, "params": "82M", "type": "GPT-2"},
+            "gpt2": {"size_gb": 0.5, "params": "124M", "type": "GPT-2"},
+            "gpt2-medium": {"size_gb": 1.5, "params": "355M", "type": "GPT-2"},
+            "gpt2-large": {"size_gb": 3.0, "params": "774M", "type": "GPT-2"},
+            "gpt2-xl": {"size_gb": 6.0, "params": "1.5B", "type": "GPT-2"},
+            
+            # GPT-Neo family
+            "EleutherAI/gpt-neo-125M": {"size_gb": 0.5, "params": "125M", "type": "GPT-Neo"},
+            "EleutherAI/gpt-neo-1.3B": {"size_gb": 5.0, "params": "1.3B", "type": "GPT-Neo"},
+            "EleutherAI/gpt-neo-2.7B": {"size_gb": 10.0, "params": "2.7B", "type": "GPT-Neo"},
+            
+            # GPT-J
+            "EleutherAI/gpt-j-6B": {"size_gb": 24.0, "params": "6B", "type": "GPT-J"},
+            
+            # BERT family (smaller)
+            "bert-base-uncased": {"size_gb": 0.4, "params": "110M", "type": "BERT"},
+            "bert-large-uncased": {"size_gb": 1.3, "params": "340M", "type": "BERT"},
+            "distilbert-base-uncased": {"size_gb": 0.25, "params": "66M", "type": "DistilBERT"},
+            
+            # Other causal LMs
+            "facebook/opt-125m": {"size_gb": 0.5, "params": "125M", "type": "OPT"},
+            "facebook/opt-350m": {"size_gb": 1.3, "params": "350M", "type": "OPT"},
+            "facebook/opt-1.3b": {"size_gb": 5.0, "params": "1.3B", "type": "OPT"},
+            "facebook/opt-2.7b": {"size_gb": 10.0, "params": "2.7B", "type": "OPT"},
+            
+            # Pythia models (good for research)
+            "EleutherAI/pythia-70m": {"size_gb": 0.3, "params": "70M", "type": "Pythia"},
+            "EleutherAI/pythia-160m": {"size_gb": 0.6, "params": "160M", "type": "Pythia"},
+            "EleutherAI/pythia-410m": {"size_gb": 1.6, "params": "410M", "type": "Pythia"},
+            "EleutherAI/pythia-1b": {"size_gb": 4.0, "params": "1B", "type": "Pythia"},
+            "EleutherAI/pythia-1.4b": {"size_gb": 5.6, "params": "1.4B", "type": "Pythia"},
+            "EleutherAI/pythia-2.8b": {"size_gb": 11.0, "params": "2.8B", "type": "Pythia"},
+        }
+
+    def filter_compatible_models(
+        self,
+        ram_gb: float,
+        vram_gb: float,
+        use_gpu: bool
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Filter HuggingFace models based on system resources.
+        
+        Args:
+            ram_gb: Available system RAM in GB
+            vram_gb: Available GPU VRAM in GB
+            use_gpu: Whether to use GPU for inference
+            
+        Returns:
+            Status message and dropdown update dict
+        """
+        try:
+            # Calculate available memory with safety margin (use 80% of available)
+            safe_ram = ram_gb * 0.8
+            safe_vram = vram_gb * 0.8 if use_gpu else 0
+            
+            # Model requires: model_size + activation_memory + overhead
+            # Rule of thumb: model needs ~1.5x its size for inference
+            # Add extra overhead for ARM analysis (probes, activations)
+            memory_multiplier = 2.0  # Conservative for ARM operations
+            
+            compatible_models = []
+            incompatible_count = 0
+            
+            for model_id, info in self.known_models.items():
+                model_size = info["size_gb"]
+                required_memory = model_size * memory_multiplier
+                
+                # Check if it fits
+                if use_gpu:
+                    # Try GPU first, fallback to RAM
+                    fits_gpu = required_memory <= safe_vram
+                    fits_ram = required_memory <= safe_ram
+                    is_compatible = fits_gpu or fits_ram
+                    
+                    if is_compatible:
+                        location = "🎮 GPU" if fits_gpu else "💾 CPU"
+                        display_name = f"{model_id} [{info['params']}, {model_size:.1f}GB] {location}"
+                        compatible_models.append((model_id, display_name, model_size))
+                    else:
+                        incompatible_count += 1
+                else:
+                    # CPU only
+                    if required_memory <= safe_ram:
+                        display_name = f"{model_id} [{info['params']}, {model_size:.1f}GB] 💾 CPU"
+                        compatible_models.append((model_id, display_name, model_size))
+                    else:
+                        incompatible_count += 1
+            
+            # Sort by size (smallest first)
+            compatible_models.sort(key=lambda x: x[2])
+            
+            # Update dropdown choices
+            all_models = self.available_models.copy()
+            
+            if compatible_models:
+                all_models.append("--- Compatible HuggingFace Models ---")
+                for model_id, display_name, _ in compatible_models:
+                    all_models.append(display_name)
+                    # Store for later retrieval
+                    if model_id not in self.hf_compatible_models:
+                        self.hf_compatible_models.append(model_id)
+            
+            # Add local models if any
+            if self.local_models:
+                all_models.append("--- Local Models ---")
+                for model_path in self.local_models:
+                    relative_path = os.path.relpath(model_path, self.model_directory)
+                    display_name = relative_path.replace(os.sep, '/')
+                    all_models.append(f"📁 {display_name}")
+            
+            # Create status message
+            status = f"✅ Found {len(compatible_models)} compatible model(s)\n"
+            status += f"   RAM: {ram_gb}GB (using {safe_ram:.1f}GB safely)\n"
+            if use_gpu:
+                status += f"   VRAM: {vram_gb}GB (using {safe_vram:.1f}GB safely)\n"
+            status += f"   Excluded {incompatible_count} models (too large)\n\n"
+            
+            if compatible_models:
+                status += "Smallest to largest:\n"
+                for model_id, display_name, size in compatible_models[:5]:
+                    status += f"  • {model_id} ({size:.1f}GB)\n"
+                if len(compatible_models) > 5:
+                    status += f"  ... and {len(compatible_models) - 5} more\n"
+            else:
+                status = "❌ No compatible models found with current settings.\n"
+                status += "Try increasing RAM limit or disabling GPU mode."
+            
+            return status, gr.update(choices=all_models, value=all_models[0] if all_models else None)
+            
+        except Exception as e:
+            return f"❌ Error filtering models: {str(e)}", gr.update(choices=self.available_models)
+
+    def scan_model_directory(self, directory_path: str) -> Tuple[str, Dict[str, Any]]:
+        """
+        Recursively scan a directory for valid transformer models.
+        
+        Args:
+            directory_path: Path to directory containing model folders
+            
+        Returns:
+            Status message and dropdown update dict
+        """
+        if not directory_path:
+            return "⚠️ No directory selected", gr.update(choices=self.available_models)
+        
+        try:
+            directory_path = directory_path.strip()
+            
+            if not os.path.isdir(directory_path):
+                return f"❌ Not a valid directory: {directory_path}", gr.update(choices=self.available_models)
+            
+            self.model_directory = directory_path
+            self.local_models = []
+            
+            # Recursively walk through all subdirectories
+            for root, dirs, files in os.walk(directory_path):
+                # Check if current directory contains a valid model
+                # (must have config.json at minimum)
+                if "config.json" in files:
+                    self.local_models.append(root)
+                    # Don't descend into this directory's subdirectories
+                    # since we found a model here
+                    dirs.clear()
+            
+            # Sort models by path for easier navigation
+            self.local_models.sort()
+            
+            # Combine HuggingFace models and local models
+            all_models = self.available_models.copy()
+            if self.local_models:
+                all_models.append("--- Local Models ---")
+                # Show relative path from base directory for clarity
+                for model_path in self.local_models:
+                    relative_path = os.path.relpath(model_path, directory_path)
+                    # Use forward slashes for consistency across platforms
+                    display_name = relative_path.replace(os.sep, '/')
+                    all_models.append(f"📁 {display_name}")
+            
+            status = f"✅ Found {len(self.local_models)} model(s) in: {directory_path}"
+            if len(self.local_models) == 0:
+                status += "\n\n⚠️ No valid models found. Models must contain 'config.json'.\n"
+                status += "Searched recursively through all subdirectories."
+            else:
+                status += f"\n\nModels found:\n" + "\n".join([f"  • {os.path.relpath(m, directory_path)}" for m in self.local_models[:10]])
+                if len(self.local_models) > 10:
+                    status += f"\n  ... and {len(self.local_models) - 10} more"
+            
+            return status, gr.update(choices=all_models, value=all_models[0])
+            
+        except Exception as e:
+            return f"❌ Error scanning directory: {str(e)}", gr.update(choices=self.available_models)
+    
+    def get_model_path(self, model_selection: str) -> str:
+        """
+        Convert UI model selection to actual model path/name.
+        
+        Args:
+            model_selection: Selected value from dropdown
+            
+        Returns:
+            Full path for local models, or HuggingFace ID for online models
+        """
+        # Skip separators
+        if "--- " in model_selection and " ---" in model_selection:
+            return self.available_models[0]  # Default to first HF model
+        
+        # Handle HuggingFace models with metadata (e.g., "gpt2 [124M, 0.5GB] 💾 CPU")
+        if "[" in model_selection and "]" in model_selection:
+            # Extract model ID (everything before the bracket)
+            model_id = model_selection.split("[")[0].strip()
+            return model_id
+        
+        # Handle local model (prefixed with 📁)
+        if model_selection.startswith("📁 "):
+            relative_path = model_selection[2:]  # Remove emoji prefix
+            # Convert forward slashes back to OS-specific separators
+            relative_path = relative_path.replace('/', os.sep)
+            
+            # Find full path by matching relative path
+            for local_path in self.local_models:
+                if self.model_directory:
+                    model_relative = os.path.relpath(local_path, self.model_directory)
+                    if model_relative == relative_path:
+                        return local_path
+            
+            # Fallback: try to construct path directly
+            if self.model_directory:
+                constructed_path = os.path.join(self.model_directory, relative_path)
+                if os.path.exists(constructed_path):
+                    return constructed_path
+            
+            return model_selection  # Last resort fallback
+        
+        # Plain HuggingFace model ID or other
+        return model_selection
 
     def create_config_from_inputs(
         self,
@@ -88,32 +333,47 @@ class ARMInterface:
     ) -> Tuple[str, str, str, str, str]:
         """Run ARM analysis on input prompts."""
 
-        progress(0.1, "Initializing ARM configuration...")
-
-        # Parse prompts
-        prompts = [p.strip() for p in prompts_text.split('\n') if p.strip()]
-        if not prompts:
-            return "❌ Error: No prompts provided", "", "", "", ""
-
-        # Create configuration
-        config = self.create_config_from_inputs(
-            model_name, n_seeds, probes_per_seed, steps_per_probe,
-            eps, layer_to_probe, n_modes, 1.0, 50
-        )
-
-        progress(0.3, f"Loading model {model_name}...")
-
+        # Prevent concurrent operations
+        if self.is_processing:
+            return "⚠️ Analysis already in progress. Please wait for it to complete.", "", "", "", ""
+        
+        self.is_processing = True
+        
         try:
+            progress(0.1, desc="⚙️ Initializing ARM configuration...")
+
+            # Parse prompts
+            prompts = [p.strip() for p in prompts_text.split('\n') if p.strip()]
+            if not prompts:
+                return "❌ Error: No prompts provided", "", "", "", ""
+
+            # Convert model selection to actual path/name
+            actual_model_path = self.get_model_path(model_name)
+
+            # Create configuration
+            config = self.create_config_from_inputs(
+                actual_model_path, n_seeds, probes_per_seed, steps_per_probe,
+                eps, layer_to_probe, n_modes, 1.0, 50
+            )
+
+            progress(0.2, desc=f"📥 Loading model: {model_name}")
+            progress(0.25, desc="This may take 1-5 minutes on first use (downloading model)...")
+
             # Initialize ARM
             self.current_mapper = ARMMapper(config)
+            self.current_config = config  # Store config for saving
+            self.current_prompts = prompts  # Store prompts for saving
 
-            progress(0.6, f"Analyzing {len(prompts)} prompts...")
+            progress(0.4, desc=f"🔬 Running ARM analysis on {len(prompts)} prompt(s)...")
+            progress(0.5, desc="Generating directional probes...")
 
             # Run analysis
             results = self.current_mapper.map_latent_manifold(prompts)
             self.current_results = results
 
-            progress(0.9, "Generating visualizations...")
+            progress(0.8, desc="📊 Analyzing resonance patterns...")
+            progress(0.85, desc="🗺️ Computing topological features...")
+            progress(0.9, desc="🎨 Generating visualizations...")
 
             # Create summary
             summary = self.create_analysis_summary(results, prompts, config)
@@ -123,7 +383,7 @@ class ARMInterface:
             topology_plot = self.create_topology_plot(results)
             descriptor_plot = self.create_descriptor_plot(results)
 
-            progress(1.0, "Analysis complete!")
+            progress(1.0, desc="✅ Analysis complete!")
 
             return (
                 "✅ Analysis completed successfully!",
@@ -136,6 +396,10 @@ class ARMInterface:
         except Exception as e:
             error_msg = f"❌ Analysis failed: {str(e)}"
             return error_msg, "", "", "", ""
+        
+        finally:
+            # Always reset processing flag
+            self.is_processing = False
 
     def create_analysis_summary(self, results: Dict[str, Any],
                               prompts: List[str], config: ARMConfig) -> str:
@@ -487,6 +751,9 @@ class ARMInterface:
 
             # Load results
             self.current_results = self.convert_results_from_saved(data['results'])
+            
+            # Restore prompts into results dict (required for text generation)
+            self.current_results['prompts'] = self.current_prompts
 
             # Create summary
             summary = self.create_analysis_summary(
@@ -501,14 +768,17 @@ class ARMInterface:
             descriptor_plot = self.create_descriptor_plot(self.current_results)
 
             # Re-initialize mapper for text generation
+            mapper_status = ""
             try:
                 self.current_mapper = ARMMapper(self.current_config)
-            except Exception:
+                mapper_status = f"\n\n✅ Model '{self.current_config.model_name}' loaded successfully for text generation."
+            except Exception as e:
                 # Mapper initialization might fail if model isn't available
-                pass
+                self.current_mapper = None
+                mapper_status = f"\n\n⚠️ Warning: Could not load model '{self.current_config.model_name}' ({str(e)}). Visualizations available, but text generation disabled."
 
             return (
-                "✅ Results loaded successfully!",
+                f"✅ Results loaded successfully!{mapper_status}",
                 summary,
                 resonance_plot,
                 topology_plot,
@@ -645,6 +915,74 @@ def create_gradio_interface():
                         info="Choose the transformer model to analyze"
                     )
 
+                    # HuggingFace model browser with compatibility check
+                    with gr.Accordion("🤗 Browse Compatible HuggingFace Models", open=False):
+                        gr.Markdown("""
+                        **Find Models Compatible with Your System**
+                        
+                        Filter curated HuggingFace models based on your available RAM and VRAM.
+                        Models are categorized by size and compatibility.
+                        """)
+                        
+                        with gr.Row():
+                            ram_input = gr.Slider(
+                                minimum=1, maximum=128, value=32, step=1,
+                                label="Available RAM (GB)",
+                                info="Total system memory available"
+                            )
+                            vram_input = gr.Slider(
+                                minimum=0, maximum=80, value=4, step=1,
+                                label="Available VRAM (GB)",
+                                info="GPU memory (0 if CPU-only)"
+                            )
+                        
+                        use_gpu_checkbox = gr.Checkbox(
+                            value=True,
+                            label="Use GPU if available",
+                            info="Try GPU first, fallback to CPU if needed"
+                        )
+                        
+                        filter_models_btn = gr.Button(
+                            "🔍 Find Compatible Models",
+                            variant="primary",
+                            size="sm"
+                        )
+                        
+                        hf_filter_status = gr.Textbox(
+                            label="Compatibility Results",
+                            interactive=False,
+                            lines=8
+                        )
+
+                    # Local model directory browser
+                    with gr.Accordion("📁 Local Model Directory", open=False):
+                        gr.Markdown("""
+                        **Manage Local Models**
+                        
+                        Point to your models directory - the scanner will **recursively search** all subdirectories.
+                        Models can be nested at any depth (e.g., `models/huggingface/my-model/`).
+                        Each model needs a `config.json` file to be recognized.
+                        """)
+                        
+                        model_dir_input = gr.Textbox(
+                            label="Model Directory Path",
+                            placeholder="e.g., C:\\Users\\YourName\\models or /home/user/models",
+                            info="Enter or paste the path to your models directory"
+                        )
+                        
+                        with gr.Row():
+                            scan_dir_btn = gr.Button(
+                                "🔍 Scan Directory",
+                                variant="secondary",
+                                size="sm"
+                            )
+                        
+                        model_dir_status = gr.Textbox(
+                            label="Scan Status",
+                            interactive=False,
+                            lines=2
+                        )
+
                     with gr.Row():
                         n_seeds = gr.Slider(
                             minimum=1, maximum=10, value=3, step=1,
@@ -703,13 +1041,20 @@ def create_gradio_interface():
                         variant="primary",
                         size="lg"
                     )
-
-            with gr.Row():
-                status_output = gr.Textbox(
-                    label="Status",
-                    interactive=False,
-                    lines=2
-                )
+                    
+                    # Status output directly under button for visibility
+                    status_output = gr.Textbox(
+                        label="🔄 Analysis Status",
+                        interactive=False,
+                        lines=3,
+                        placeholder="Click 'Run ARM Analysis' to start. Progress will show here...",
+                        show_label=True
+                    )
+                    
+                    gr.Markdown("""
+                    ⏱️ **Processing Time**: 30 seconds to several minutes depending on model size.
+                    **Watch the status box above** - progress updates will appear there!
+                    """, elem_classes=["warning-text"])
 
             with gr.Row():
                 summary_output = gr.Markdown(
@@ -930,9 +1275,77 @@ def create_gradio_interface():
             2. Try different epsilon values (0.01, 0.03, 0.1) to see sensitivity
             3. Experiment with different layers to understand hierarchical behavior
             4. Use prompts from the same domain for more coherent topology
+            5. **Wait for progress bars** - Don't click buttons multiple times!
+            6. **Watch the Status box** for feedback during long operations
+            7. Model downloads happen automatically on first use (can take 1-5 minutes)
+
+            ### Finding Compatible Models
+            
+            **HuggingFace Model Browser (NEW!):**
+            1. Click "🤗 Browse Compatible HuggingFace Models" to expand
+            2. Set your system specs:
+               - **RAM**: Your system memory (default: 32GB)
+               - **VRAM**: Your GPU memory (default: 4GB, or 0 for CPU-only)
+               - **Use GPU**: Check if you want to use GPU when possible
+            3. Click "🔍 Find Compatible Models"
+            4. Compatible models will be added to the dropdown with:
+               - Model name and organization
+               - Parameter count (e.g., 124M, 1.3B)
+               - Size in GB
+               - Where it will run: 🎮 GPU or 💾 CPU
+            
+            **How It Works:**
+            - Estimates memory requirements (model size × 2 for ARM operations)
+            - Filters models that fit in your available memory
+            - Prioritizes GPU if available, falls back to CPU
+            - Uses 80% of available memory for safety
+            - Shows smallest models first
+            
+            **Example Output:**
+            ```
+            distilgpt2 [82M, 0.2GB] 🎮 GPU
+            gpt2 [124M, 0.5GB] 🎮 GPU
+            EleutherAI/pythia-410m [410M, 1.6GB] 💾 CPU
+            ```
+            
+            ### Using Local Models
+            
+            **Local Model Directory Feature:**
+            1. Click "📁 Local Model Directory" to expand the section
+            2. Enter or paste the path to your models directory
+            3. Click "🔍 Scan Directory" to search for models **recursively**
+            4. Local models will appear in the Model dropdown with a 📁 icon and their path
+            
+            **How Scanning Works:**
+            - **Recursive search**: Searches through ALL subdirectories automatically
+            - Finds models at any depth in your directory structure
+            - Each model identified by presence of `config.json`
+            - Displays relative path from base directory (e.g., `📁 huggingface/my-model`)
+            
+            **Requirements for Local Models:**
+            - Must contain at least a `config.json` file
+            - Should also have model weights (`pytorch_model.bin` or `.safetensors`)
+            - Compatible with HuggingFace transformers format
+            
+            **Example Directory Structure:**
+            ```
+            C:\\Users\\YourName\\models\\
+            ├── huggingface\\
+            │   ├── my-finetuned-gpt2\\
+            │   │   ├── config.json
+            │   │   ├── pytorch_model.bin
+            │   │   └── tokenizer files...
+            │   └── another-model\\
+            │       ├── config.json
+            │       └── model.safetensors
+            ├── custom\\
+            │   └── experimental-v3\\
+            │       ├── config.json
+            │       └── pytorch_model.bin
+            ```
+            All models will be found regardless of nesting!
 
             ### Current Limitations
-            - Text generation steering not yet implemented
             - GPU acceleration requires CUDA installation
             - Very large models (>1B parameters) may be slow
             - Topology analysis works best with 3+ prompts
@@ -944,6 +1357,20 @@ def create_gradio_interface():
             fn=arm_interface.load_prompt_file,
             inputs=[prompt_file_input],
             outputs=[prompts_input]
+        )
+
+        # Filter HuggingFace models by compatibility
+        filter_models_btn.click(
+            fn=arm_interface.filter_compatible_models,
+            inputs=[ram_input, vram_input, use_gpu_checkbox],
+            outputs=[hf_filter_status, model_dropdown]
+        )
+
+        # Scan local model directory
+        scan_dir_btn.click(
+            fn=arm_interface.scan_model_directory,
+            inputs=[model_dir_input],
+            outputs=[model_dir_status, model_dropdown]
         )
 
         analyze_btn.click(

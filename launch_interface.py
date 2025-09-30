@@ -37,7 +37,8 @@ def main():
             server_port=7860,
             share=False,  # Don't create public link
             show_error=True,
-            quiet=False
+            quiet=False,
+            debug=True
         )
 
     except ImportError as e:
