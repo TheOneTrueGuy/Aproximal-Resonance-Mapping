@@ -18,7 +18,8 @@ Clone the repo
 
 make and activate a venv
 
-pip install -r requirements.txt
+pip install -r requirements-test.txt
 
 python launch_interface.py
+
 
