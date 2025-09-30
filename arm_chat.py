@@ -100,7 +100,11 @@ class ARMChatApp:
         steering_strength: float,
         max_tokens: int,
         temperature: float,
-        history: List[Tuple[str, str]]
+        history: List[Tuple[str, str]],
+        basis_mode: str = "top1",
+        single_mode_index: int = 0,
+        blend_mode_indices: str = "",
+        blend_mode_weights: str = "",
     ) -> Tuple[List[Tuple[str, str]], str]:
         """
         Generate a response to user message with ARM steering.
@@ -161,12 +165,42 @@ class ARMChatApp:
                 # Blend signatures if multiple
                 blended_signature = np.mean(signatures, axis=0) if len(signatures) > 1 else signatures[0]
                 
+                # Parse basis selection
+                mode_indices = None
+                mode_weights = None
+                if basis_mode == "single":
+                    mode_indices = [int(single_mode_index)]
+                elif basis_mode == "blend":
+                    try:
+                        mode_indices = [int(x.strip()) for x in blend_mode_indices.split(',') if x.strip()]
+                    except ValueError:
+                        response = "❌ Invalid blend mode indices (use comma-separated integers)."
+                        history.append((user_message, response))
+                        return history, ""
+                    if not mode_indices:
+                        response = "❌ Provide at least one mode index for blend"
+                        history.append((user_message, response))
+                        return history, ""
+                    if blend_mode_weights.strip():
+                        try:
+                            mode_weights = [float(x.strip()) for x in blend_mode_weights.split(',') if x.strip()]
+                        except ValueError:
+                            response = "❌ Invalid blend weights (use comma-separated numbers)."
+                            history.append((user_message, response))
+                            return history, ""
+                        if len(mode_weights) != len(mode_indices):
+                            response = "❌ Number of weights must match number of mode indices"
+                            history.append((user_message, response))
+                            return history, ""
+
                 response = self.mapper.steer_generation_toward_signature(
                     prompt=context,
                     target_signature=blended_signature,
                     max_length=max_tokens,
                     temperature=temperature,
-                    steering_strength=steering_strength
+                    steering_strength=steering_strength,
+                    mode_indices=mode_indices,
+                    mode_weights=mode_weights,
                 )
             else:
                 response = "❌ Unknown steering mode"
@@ -268,6 +302,25 @@ def create_chat_interface():
                     minimum=0.1, maximum=2.0, value=0.8, step=0.1,
                     label="Temperature"
                 )
+
+                # Basis selection controls
+                basis_mode = gr.Radio(
+                    choices=["top1", "single", "blend"],
+                    value="top1",
+                    label="Basis Mode (singular vectors)"
+                )
+                single_mode_index = gr.Slider(
+                    minimum=0, maximum=7, value=0, step=1,
+                    label="Single Mode Index"
+                )
+                blend_mode_indices = gr.Textbox(
+                    label="Blend Mode Indices",
+                    placeholder="e.g., 0,1,2"
+                )
+                blend_mode_weights = gr.Textbox(
+                    label="Blend Weights (optional)",
+                    placeholder="e.g., 0.6,0.4"
+                )
                 
                 clear_btn = gr.Button("🗑️ Clear History", variant="secondary")
             
@@ -299,14 +352,16 @@ def create_chat_interface():
         msg.submit(
             fn=app.chat,
             inputs=[msg, steering_mode, target_signature_indices, 
-                   steering_strength, max_tokens, temperature, chatbot],
+                   steering_strength, max_tokens, temperature, chatbot,
+                   basis_mode, single_mode_index, blend_mode_indices, blend_mode_weights],
             outputs=[chatbot, msg]
         )
         
         send_btn.click(
             fn=app.chat,
             inputs=[msg, steering_mode, target_signature_indices,
-                   steering_strength, max_tokens, temperature, chatbot],
+                   steering_strength, max_tokens, temperature, chatbot,
+                   basis_mode, single_mode_index, blend_mode_indices, blend_mode_weights],
             outputs=[chatbot, msg]
         )
         

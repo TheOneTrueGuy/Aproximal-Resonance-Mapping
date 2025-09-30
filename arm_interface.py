@@ -620,7 +620,11 @@ class ARMInterface:
         positive_indices: str = "",
         negative_indices: str = "",
         target_signature_indices: str = "0",
-        steering_strength: float = 1.0
+        steering_strength: float = 1.0,
+        basis_mode: str = "top1",
+        single_mode_index: int = 0,
+        blend_mode_indices: str = "",
+        blend_mode_weights: str = ""
     ) -> str:
         """Generate text with optional ARM steering."""
 
@@ -700,12 +704,34 @@ class ARMInterface:
                     blended_signature = signatures[0]
                     signature_desc = f"Single signature from: [{indices[0]}] {prompt_texts[0]}"
 
+                # Parse basis selection
+                mode_indices = None
+                mode_weights = None
+                if basis_mode == "single":
+                    mode_indices = [int(single_mode_index)]
+                elif basis_mode == "blend":
+                    try:
+                        mode_indices = [int(x.strip()) for x in blend_mode_indices.split(',') if x.strip()]
+                    except ValueError:
+                        return "❌ Error: Blend mode indices must be comma-separated integers (e.g., '0,1,2')"
+                    if not mode_indices:
+                        return "❌ Error: Provide at least one mode index for blend"
+                    if blend_mode_weights.strip():
+                        try:
+                            mode_weights = [float(x.strip()) for x in blend_mode_weights.split(',') if x.strip()]
+                        except ValueError:
+                            return "❌ Error: Blend weights must be comma-separated numbers (e.g., '0.6,0.4')"
+                        if len(mode_weights) != len(mode_indices):
+                            return "❌ Error: Number of weights must match number of mode indices"
+
                 generated_text = self.current_mapper.steer_generation_toward_signature(
                     prompt=target_prompt,
                     target_signature=blended_signature,
                     max_length=max_tokens,
                     temperature=temperature,
-                    steering_strength=steering_strength
+                    steering_strength=steering_strength,
+                    mode_indices=mode_indices,
+                    mode_weights=mode_weights
                 )
 
                 return f"🌀 Manifold signature steering (strength: {steering_strength}):\n\n{signature_desc}\n\n{generated_text}"
@@ -1279,6 +1305,33 @@ def create_gradio_interface():
                             info="Comma-separated indices of seeds whose signatures to blend and target"
                         )
 
+                        # Basis selection for singular vectors
+                        basis_mode = gr.Radio(
+                            choices=["top1", "single", "blend"],
+                            value="top1",
+                            label="Basis Mode (singular vectors)",
+                            info="Choose top-1, a single mode index, or a weighted blend"
+                        )
+
+                        with gr.Group(visible=False) as single_mode_group:
+                            single_mode_index = gr.Slider(
+                                minimum=0, maximum=7, value=0, step=1,
+                                label="Single Mode Index",
+                                info="Select a singular mode index (0 = top)"
+                            )
+
+                        with gr.Group(visible=False) as blend_modes_group:
+                            blend_mode_indices = gr.Textbox(
+                                label="Blend Mode Indices",
+                                placeholder="e.g., 0,1,2",
+                                info="Comma-separated mode indices to blend"
+                            )
+                            blend_mode_weights = gr.Textbox(
+                                label="Blend Weights (optional)",
+                                placeholder="e.g., 0.6,0.4",
+                                info="Comma-separated weights; defaults to equal weights"
+                            )
+
                 with gr.Column():
                     generate_btn = gr.Button(
                         "🎭 Generate Text",
@@ -1484,11 +1537,27 @@ def create_gradio_interface():
             outputs=[control_vector_group, manifold_group]
         )
 
+        # Show/hide basis mode controls inside manifold group
+        def update_basis_visibility(mode):
+            if mode == "single":
+                return [gr.Group(visible=True), gr.Group(visible=False)]
+            elif mode == "blend":
+                return [gr.Group(visible=False), gr.Group(visible=True)]
+            else:
+                return [gr.Group(visible=False), gr.Group(visible=False)]
+
+        basis_mode.change(
+            fn=update_basis_visibility,
+            inputs=[basis_mode],
+            outputs=[single_mode_group, blend_modes_group]
+        )
+
         generate_btn.click(
             fn=arm_interface.generate_steered_text,
             inputs=[
                 target_prompt, temperature, max_tokens, steering_mode,
-                positive_indices, negative_indices, target_signature_indices, steering_strength
+                positive_indices, negative_indices, target_signature_indices, steering_strength,
+                basis_mode, single_mode_index, blend_mode_indices, blend_mode_weights
             ],
             outputs=[generated_output]
         )

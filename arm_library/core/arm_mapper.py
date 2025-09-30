@@ -258,7 +258,9 @@ class ARMMapper:
         target_signature: np.ndarray,
         max_length: int = 50,
         temperature: float = 0.8,
-        steering_strength: float = 1.0
+        steering_strength: float = 1.0,
+        mode_indices: Optional[List[int]] = None,
+        mode_weights: Optional[List[float]] = None,
     ) -> str:
         """
         Generate text steered toward a target resonance signature.
@@ -283,5 +285,7 @@ class ARMMapper:
             manifold_data=self._last_results,
             max_length=max_length,
             temperature=temperature,
-            steering_strength=steering_strength
+            steering_strength=steering_strength,
+            mode_indices=mode_indices,
+            mode_weights=mode_weights,
         )

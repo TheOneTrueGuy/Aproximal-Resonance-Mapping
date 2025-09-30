@@ -64,6 +64,36 @@ class TransformerModelInterface:
 
         self.model.eval()
 
+        # Validate supported architecture (currently GPT-2-like)
+        self._validate_supported_architecture()
+
+    def _validate_supported_architecture(self) -> None:
+        """
+        Validate that the loaded model exposes GPT-2-style components required by ARM:
+        - model.transformer.h (list of blocks)
+        - model.transformer.wte (token embeddings)
+        - model.transformer.wpe (position embeddings)
+        - model.transformer.ln_f (final layer norm)
+
+        If not available, raise a clear error so users can pick a compatible model.
+        """
+        missing = []
+        transformer = getattr(self.model, 'transformer', None)
+        if transformer is None:
+            raise ValueError(
+                "Unsupported model architecture: missing 'transformer' module. "
+                "ARM currently supports GPT-2 family models (e.g., distilgpt2, gpt2, gpt2-medium)."
+            )
+        for name in ['h', 'wte', 'wpe', 'ln_f']:
+            if not hasattr(transformer, name):
+                missing.append(name)
+        if missing:
+            raise ValueError(
+                "Unsupported model architecture for ARM operations. Missing components: "
+                + ", ".join(missing) + ". "
+                "Please use a GPT-2-like model (distilgpt2, gpt2, gpt2-medium, gpt2-large, gpt2-xl)."
+            )
+
     def encode_prompt(self, prompt: str) -> Tuple[torch.LongTensor, torch.Tensor]:
         """Encode prompt to input_ids and attention_mask."""
         tokens = self.tokenizer(prompt, return_tensors="pt")

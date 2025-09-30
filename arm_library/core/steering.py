@@ -109,7 +109,9 @@ class ARMControlVectorComputer:
         target_signature: np.ndarray,
         layer: int,
         manifold_data: Dict[str, Any],
-        normalize: bool = True
+        normalize: bool = True,
+        mode_indices: Optional[List[int]] = None,
+        mode_weights: Optional[List[float]] = None,
     ) -> ARMControlVector:
         """
         Compute a control vector that steers toward a specific resonance signature
@@ -142,7 +144,8 @@ class ARMControlVectorComputer:
             raise ValueError("No suitable seed found for manifold steering")
 
         # Derive a hidden-sized direction from resonance data
-        # Prefer the first right singular vector (top principal direction)
+        # By default, use the first right singular vector (top principal direction),
+        # or build a weighted blend of specified mode vectors.
         best_sig = seed_analyses[best_seed_idx]['resonance_signature']
         top_singular_vectors = best_sig.get('top_singular_vectors', None)
         if top_singular_vectors is None:
@@ -157,7 +160,27 @@ class ARMControlVectorComputer:
                 f"Got singular vector size {top_singular_vectors.shape[1]} vs hidden size {hidden_size}."
             )
 
-        control_direction = torch.tensor(top_singular_vectors[0], dtype=torch.float32)
+        # Select vectors
+        if mode_indices is None or len(mode_indices) == 0:
+            vec = top_singular_vectors[0]
+        else:
+            # Validate indices in range
+            max_mode = top_singular_vectors.shape[0] - 1
+            for mi in mode_indices:
+                if mi < 0 or mi > max_mode:
+                    raise ValueError(f"Mode index {mi} out of range 0..{max_mode}")
+            if mode_weights is None or len(mode_weights) == 0:
+                weights = np.ones(len(mode_indices), dtype=np.float32) / float(len(mode_indices))
+            else:
+                if len(mode_weights) != len(mode_indices):
+                    raise ValueError("mode_weights length must match mode_indices length")
+                weights = np.array(mode_weights, dtype=np.float32)
+                ws = np.sum(np.abs(weights))
+                if ws > 0:
+                    weights = weights / ws
+            # Weighted combination of selected singular vectors
+            vec = np.sum([weights[i] * top_singular_vectors[idx] for i, idx in enumerate(mode_indices)], axis=0)
+        control_direction = torch.tensor(vec, dtype=torch.float32)
         if normalize:
             control_direction = control_direction / (torch.norm(control_direction) + 1e-8)
 
@@ -312,6 +335,8 @@ class ARMControlledGenerator:
         max_length: int = 50,
         temperature: float = 1.0,
         steering_strength: float = 1.0,
+        mode_indices: Optional[List[int]] = None,
+        mode_weights: Optional[List[float]] = None,
         **generation_kwargs
     ) -> str:
         """
@@ -337,7 +362,11 @@ class ARMControlledGenerator:
         computer = ARMControlVectorComputer(self.model_interface)
         layer = manifold_data.get('layer_to_probe', 6)  # Default to layer 6
         control_vector = computer.compute_manifold_control_vector(
-            target_signature, layer, manifold_data
+            target_signature=target_signature,
+            layer=layer,
+            manifold_data=manifold_data,
+            mode_indices=mode_indices,
+            mode_weights=mode_weights,
         )
         control_vector.coefficient = steering_strength
 

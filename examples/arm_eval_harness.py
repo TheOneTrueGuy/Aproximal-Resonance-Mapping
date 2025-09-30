@@ -106,6 +106,103 @@ def build_arm(config: EvalConfig) -> ARMMapper:
     return ARMMapper(arm_config)
 
 
+def quick_signature(arm: ARMMapper, text: str, k: int = 2, steps: int = 3, eps: float = 0.02):
+    """Compute a lightweight resonance signature for arbitrary text."""
+    A = arm.collect_activation_matrix(text, k=k, steps=steps, eps=eps)
+    return arm.resonance_analyzer.resonance_signature(A)
+
+
+def topology_summary(manifold: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute simple topology/cluster summary metrics from manifold results."""
+    from sklearn.metrics import silhouette_score
+
+    out = {}
+    try:
+        X = manifold['graph_data']['feature_vectors']
+        labels = np.array(manifold['clustering_data']['cluster_labels'])
+
+        # Silhouette only valid if >1 cluster and each cluster has >1 sample
+        if len(np.unique(labels)) > 1 and len(X) >= 3:
+            out['silhouette'] = float(silhouette_score(X, labels))
+        else:
+            out['silhouette'] = None
+
+        sizes = [int(np.sum(labels == i)) for i in range(manifold['clustering_data']['n_clusters'])]
+        out['cluster_sizes'] = sizes
+        out['n_clusters'] = int(manifold['clustering_data']['n_clusters'])
+    except Exception:
+        out['silhouette'] = None
+    return out
+
+
+def eval_manifold_signature(arm: ARMMapper, cfg: EvalConfig,
+                            pos: List[str], neg: List[str], request: str,
+                            target_idx: int = 0) -> Dict[str, Any]:
+    """Sweep manifold-signature steering strength and measure signature similarity lift."""
+    # Build manifold from exemplars
+    manifold_prompts = pos + neg
+    manifold = arm.map_latent_manifold(manifold_prompts)
+
+    # Target is one of the positive exemplars by default
+    target_sig = manifold['seed_analyses'][target_idx]['resonance_signature']['s_norm']
+
+    results = []
+    for s in cfg.strengths:
+        if s > 0:
+            generated = arm.steer_generation_toward_signature(
+                prompt=request,
+                target_signature=target_sig,
+                max_length=cfg.max_tokens,
+                temperature=cfg.temperature,
+                steering_strength=s,
+            )
+        else:
+            gen = arm.create_controlled_generator()
+            generated = gen.generate_with_steering(
+                prompt=request,
+                max_length=cfg.max_tokens,
+                temperature=cfg.temperature,
+                do_sample=True,
+            )
+
+        sig = quick_signature(arm, generated)
+        m = min(len(sig['s_norm']), len(target_sig))
+        denom = (np.linalg.norm(sig['s_norm'][:m]) * np.linalg.norm(target_sig[:m]) + 1e-12)
+        cosine = float(np.dot(sig['s_norm'][:m], target_sig[:m]) / denom)
+
+        results.append({
+            'strength': s,
+            'signature_cosine': cosine,
+            'output': generated,
+        })
+
+    # Save CSV
+    csv_path = os.path.join(OUTPUT_DIR, "manifold_signature_results.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["strength", "signature_cosine", "output"])
+        writer.writeheader()
+        writer.writerows(results)
+
+    # Plot
+    plot_path = plot_dose_response(
+        [r['strength'] for r in results],
+        [r['signature_cosine'] for r in results],
+        title="Signature cosine vs. steering strength (manifold)",
+        ylabel="Cosine(sim(generated, target))",
+        filename="manifold_signature_dose_response.png",
+    )
+
+    # Topology/cluster summary
+    topo = topology_summary(manifold)
+
+    return {
+        'results_csv': csv_path,
+        'plot': plot_path,
+        'rows': results,
+        'topology': topo,
+    }
+
+
 def compute_control_vector_from_examples(arm: ARMMapper, pos_prompts: List[str], neg_prompts: List[str], strength: float):
     control = arm.compute_steering_vector_from_manifold(
         positive_region_indices=list(range(len(pos_prompts))),
@@ -269,6 +366,23 @@ def main():
     style_res = eval_style_transfer(arm, cfg)
     print(f"CSV: {style_res['results_csv']}")
     print(f"Plot: {style_res['plot']}")
+
+    print("\nRunning manifold-signature evaluation...")
+    # Reuse style exemplars for manifold evaluation
+    pos = [
+        "Continue in a whimsical, nonsensical, Carroll-like verse style with neologisms.",
+        "Write in playful, rhythmic nonsense poetry with invented words.",
+    ]
+    neg = [
+        "Write a dry technical summary with formal tone and no poetry.",
+    ]
+    request = "The creature lurked in the tulgey wood, and I raised my eyes to speak:"
+    mani_res = eval_manifold_signature(arm, cfg, pos, neg, request, target_idx=0)
+    print(f"CSV: {mani_res['results_csv']}")
+    print(f"Plot: {mani_res['plot']}")
+    topo = mani_res.get('topology', {})
+    if topo:
+        print(f"Topology: n_clusters={topo.get('n_clusters')}, sizes={topo.get('cluster_sizes')}, silhouette={topo.get('silhouette')}")
 
     print("\nDone. Check arm_output/ for results and plots.")
 
