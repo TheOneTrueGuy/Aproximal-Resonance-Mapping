@@ -1,3 +1,56 @@
+import numpy as np
+import pytest
+
+from arm_library.core.resonance_analyzer import ResonanceAnalyzer
+from arm_library.utils.config import ARMConfig
+
+
+@pytest.mark.unit
+def test_rank1_spectrum_properties():
+    rng = np.random.default_rng(42)
+    # Build rank-1 matrix: u v^T with mean-centering considered in implementation
+    u = rng.normal(size=(50,))
+    v = rng.normal(size=(10,))
+    A = np.outer(u, v).astype(np.float32)
+
+    analyzer = ResonanceAnalyzer(ARMConfig(n_modes=4))
+    sig = analyzer.resonance_signature(A)
+
+    s_norm = sig["s_norm"]
+    entropy = sig["entropy"]
+    prn = sig["participation_ratio_normalized"]
+
+    # Normalized singular values sum approximately 1
+    assert np.isclose(np.sum(s_norm), 1.0, atol=1e-5)
+    # Rank-1 should have very low entropy after centering
+    assert entropy >= 0.0
+    # Single-mode dominance => normalized PR near 0
+    assert 0.0 <= prn <= 0.2
+    # Shapes
+    assert sig["top_singular_vectors"].shape[0] == min(4, len(sig["singular_values"]))
+
+
+@pytest.mark.unit
+def test_uniform_like_spectrum_vs_rank1():
+    rng = np.random.default_rng(0)
+    # Random Gaussian matrix with more modes than rank-1; column-normalize to spread energy
+    A = rng.normal(size=(60, 20)).astype(np.float32)
+    A = A - A.mean(axis=0, keepdims=True)
+    col_norms = np.linalg.norm(A, axis=0, keepdims=True) + 1e-12
+    A = A / col_norms
+
+    analyzer = ResonanceAnalyzer(ARMConfig(n_modes=6))
+    sig_u = analyzer.resonance_signature(A)
+
+    # Compare against a rank-1 baseline
+    u = rng.normal(size=(60,))
+    v = rng.normal(size=(20,))
+    A1 = np.outer(u, v).astype(np.float32)
+    sig_r1 = analyzer.resonance_signature(A1)
+
+    # Uniform-like should have higher entropy and higher normalized PR
+    assert sig_u["entropy"] > sig_r1["entropy"]
+    assert sig_u["participation_ratio_normalized"] > sig_r1["participation_ratio_normalized"]
 """
 Unit tests for ResonanceAnalyzer class.
 """

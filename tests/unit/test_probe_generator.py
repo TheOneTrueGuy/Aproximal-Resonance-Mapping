@@ -1,3 +1,50 @@
+import numpy as np
+import pytest
+
+from arm_library.core.probe_generator import ProbeGenerator
+from arm_library.utils.config import ARMConfig
+
+
+@pytest.mark.unit
+def test_sample_probes_and_expand_sequence():
+    cfg = ARMConfig(eps=0.05, random_seed=123)
+    gen = ProbeGenerator(cfg)
+
+    # Hidden sequence: seq_len x d_model
+    hidden = np.ones((6, 8), dtype=np.float32)
+
+    dirs = gen.sample_probes_for_hidden(hidden, k=4, eps=0.05)
+    assert dirs.shape == (4, 8)
+    # Non-zero and finite
+    assert np.all(np.isfinite(dirs))
+    assert np.any(np.abs(dirs) > 0)
+
+    expanded = gen.expand_delta_to_sequence(dirs[0], seq_len=6)
+    assert expanded.shape == (6, 8)
+    # All rows equal to the delta
+    assert np.allclose(expanded[0], expanded[1])
+
+
+@pytest.mark.unit
+def test_build_path_and_batch_generation():
+    cfg = ARMConfig(eps=0.03, steps_per_probe=5, random_seed=42)
+    gen = ProbeGenerator(cfg)
+    hidden = np.random.RandomState(0).randn(4, 10).astype(np.float32)
+
+    # Single direction path
+    dir_vec = np.random.RandomState(1).randn(10).astype(np.float32)
+    path, ts = gen.build_probe_path(hidden, dir_vec, steps=5, tau=1.0)
+    assert len(path) == 5
+    assert ts.shape == (5,)
+    assert path[0].shape == hidden.shape
+
+    # Batch
+    paths, dirs = gen.generate_probe_batch(hidden, k=3, steps=4, eps=0.02)
+    assert len(paths) == 3
+    assert dirs.shape == (3, 10)
+    # Each path has 4 steps of same shape as hidden
+    assert all(len(p) == 4 and p[0].shape == hidden.shape for p in paths)
+
 """
 Unit tests for ProbeGenerator class.
 """

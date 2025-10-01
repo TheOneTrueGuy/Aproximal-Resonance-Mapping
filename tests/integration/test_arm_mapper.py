@@ -51,12 +51,13 @@ class TestARMMapperIntegration:
             mock_interface.get_hidden_at_layer.side_effect = mock_get_hidden
 
             # Mock forward_from_layer
-            def mock_forward(hidden, layer_idx, attention_mask=None):
+            def mock_forward(hidden, start_layer=None, attention_mask=None, **_):
                 batch_size, seq_len, d_model = hidden.shape
                 logits = np.random.randn(batch_size, seq_len, 50257).astype(np.float32)
                 final_h = np.random.randn(batch_size, seq_len, d_model).astype(np.float32)
                 intermediates = [final_h] * 3
-                return torch.tensor(logits), torch.tensor(final_h), intermediates
+                import torch as _torch
+                return _torch.tensor(logits), _torch.tensor(final_h), intermediates
 
             mock_interface.forward_from_layer.side_effect = mock_forward
 
@@ -191,10 +192,11 @@ class TestARMMapperIntegration:
 
             # Configure consistent mock behavior
             mock_interface.get_hidden_at_layer.return_value = np.random.randn(4, 768).astype(np.float32)
+            import torch as _torch
             mock_interface.forward_from_layer.return_value = (
-                torch.randn(1, 4, 50257),
-                torch.randn(1, 4, 768),
-                [torch.randn(1, 4, 768)] * 3
+                _torch.randn(1, 4, 50257),
+                _torch.randn(1, 4, 768),
+                [_torch.randn(1, 4, 768)] * 3
             )
 
             mapper1 = ARMMapper(config)

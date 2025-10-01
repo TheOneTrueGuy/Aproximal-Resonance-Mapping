@@ -41,27 +41,27 @@ def test_basic_arm():
     print("-" * 40)
 
     try:
-    # Minimal configuration for testing
-    config = ARMConfig(
-        model_name="distilgpt2",  # Small model
-        n_seeds=3,                # Need at least 3 seeds for topology
-        probes_per_seed=2,        # Minimal probes
-        steps_per_probe=2,        # Minimal steps
-        eps=0.01,                 # Small perturbation
-        layer_to_probe=1,         # Early layer
-        n_modes=2,                # Few modes
-        topology_neighbors=2,     # Match number of seeds
-        random_seed=42,
-    )
+        # Minimal configuration for testing
+        config = ARMConfig(
+            model_name="distilgpt2",  # Small model
+            n_seeds=3,                # Need at least 3 seeds for topology
+            probes_per_seed=2,        # Minimal probes
+            steps_per_probe=2,        # Minimal steps
+            eps=0.01,                 # Small perturbation
+            layer_to_probe=1,         # Early layer
+            n_modes=2,                # Few modes
+            topology_neighbors=2,     # Match number of seeds
+            random_seed=42,
+        )
 
         print("Configuration:")
         print(f"  Model: {config.model_name}")
         print(f"  Seeds: {config.n_seeds}, Probes: {config.probes_per_seed}, Steps: {config.steps_per_probe}")
         print(f"  Device: {config.device}")
 
-    # Test prompts
-    test_prompts = ["The cat sat on", "Once upon a time", "In the beginning"]
-    print(f"  Test prompts: {test_prompts}")
+        # Test prompts
+        test_prompts = ["The cat sat on", "Once upon a time", "In the beginning"]
+        print(f"  Test prompts: {test_prompts}")
 
         # Initialize ARM
         print("Initializing ARM mapper...")

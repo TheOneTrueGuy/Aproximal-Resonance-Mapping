@@ -58,7 +58,13 @@ class ARMMapper:
 
         # Get base hidden state
         hidden_base = self.model_interface.get_hidden_at_layer(prompt, self.config.layer_to_probe)
-        hidden_base_np = hidden_base.numpy()
+        # Support both torch.Tensor and numpy.ndarray from model interface/mocks
+        if isinstance(hidden_base, torch.Tensor):
+            hidden_base_np = hidden_base.detach().cpu().numpy()
+        elif isinstance(hidden_base, np.ndarray):
+            hidden_base_np = hidden_base
+        else:
+            raise TypeError(f"Unsupported hidden_base type: {type(hidden_base)}")
 
         # Generate probe batch
         probe_paths, _ = self.probe_generator.generate_probe_batch(

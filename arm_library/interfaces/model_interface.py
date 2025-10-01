@@ -109,6 +109,9 @@ class TransformerModelInterface:
         Returns:
             Hidden states, shape (batch, seq_len, d_model)
         """
+        # Ensure token indices are integer type as required by embeddings
+        if input_ids.dtype != torch.long and input_ids.dtype != torch.int:
+            input_ids = input_ids.to(dtype=torch.long)
         wte = self.model.transformer.wte(input_ids)  # token embeddings
         seq_len = input_ids.shape[1]
         position_ids = torch.arange(seq_len, dtype=torch.long, device=self.config.device).unsqueeze(0)

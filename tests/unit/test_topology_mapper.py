@@ -1,3 +1,63 @@
+import numpy as np
+import pytest
+
+from arm_library.core.topology_mapper import TopologyMapper
+from arm_library.utils.config import ARMConfig
+
+
+@pytest.mark.unit
+def test_local_persistence_shapes():
+    cfg = ARMConfig(max_homology_dim=1)
+    mapper = TopologyMapper(cfg)
+    A = np.random.RandomState(0).randn(20, 8).astype(np.float32)
+    out = mapper.local_persistence(A)
+    assert 'diagrams' in out and isinstance(out['diagrams'], list)
+    assert 'persistence_features' in out
+    # Check finite metrics if present
+    for k, v in out['persistence_features'].items():
+        assert v['n_features'] >= 0
+        assert np.isfinite(v['max_persistence'])
+        assert np.isfinite(v['mean_persistence'])
+
+
+@pytest.mark.unit
+def test_build_resonance_graph_shapes():
+    cfg = ARMConfig(topology_neighbors=2)
+    mapper = TopologyMapper(cfg)
+    # Create three synthetic signatures
+    sigs = []
+    for i in range(3):
+        sigs.append({
+            's_norm': np.array([0.6, 0.3, 0.1], dtype=np.float32),
+            'entropy': 0.5 + 0.1 * i,
+            'participation_ratio_normalized': 0.2 + 0.1 * i,
+        })
+    g = mapper.build_resonance_graph(sigs)
+    X = g['feature_vectors']
+    W = g['adjacency_matrix']
+    E = g['spectral_embedding']
+    assert X.shape[0] == 3 and X.shape[1] >= 5
+    assert W.shape == (3, 3)
+    # For very small n, spectral embedding may return up to n-1 components
+    assert E.shape[1] in (2, 3)
+
+
+@pytest.mark.unit
+def test_detect_attractor_basins_small_n():
+    cfg = ARMConfig(topology_neighbors=2)
+    mapper = TopologyMapper(cfg)
+    sigs = []
+    for i in range(3):
+        sigs.append({
+            's_norm': np.array([0.7, 0.2, 0.1], dtype=np.float32),
+            'entropy': 0.4 + 0.1 * i,
+            'participation_ratio_normalized': 0.3 + 0.1 * i,
+        })
+    g = mapper.build_resonance_graph(sigs)
+    c = mapper.detect_attractor_basins(sigs, g)
+    assert 'cluster_labels' in c and len(c['cluster_labels']) == 3
+    assert 1 <= c['n_clusters'] <= 3
+    assert sum(c['cluster_sizes']) == 3
 """
 Unit tests for TopologyMapper class.
 """

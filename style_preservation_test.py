@@ -176,7 +176,7 @@ class ARMStyleExperiment:
         # Calculate average baseline nonsense density
         baseline_nonsense_avg = np.mean([m.get('nonsense_density', 0) for m in baseline_metrics])
 
-        print(".4f"
+        print(f"Baseline nonsense density avg: {baseline_nonsense_avg:.4f}")
         # Run ARM analysis
         print("Running ARM analysis...")
         try:
@@ -275,28 +275,28 @@ def main():
     # Analyze results
     successful_results = [r for r in results if r.get('success', False)]
 
-    print("
-📊 Results Summary:"    print(f"Total tests: {len(results)}")
+    print("\n📊 Results Summary:")
+    print(f"Total tests: {len(results)}")
     print(f"Successful: {len(successful_results)} ({len(successful_results)/len(results)*100:.1f}%)")
 
     if successful_results:
-        print("
-✅ Successful configurations:"        for result in successful_results:
+        print("\n✅ Successful configurations:")
+        for result in successful_results:
             config = result['config']
             entropy = result.get('arm_entropy_avg', 0)
-            print(".4f"
+            print(f"  eps={config['eps']}, probes={config['probes_per_seed']}, layer={config['layer_to_probe']}, entropy_avg={entropy:.4f}")
         # Find best configuration
         best_result = max(successful_results,
                          key=lambda x: x.get('arm_entropy_avg', 0))
 
-        print("
-🏆 Best Configuration:"        print(f"  Parameters: eps={best_result['config']['eps']}, probes={best_result['config']['probes_per_seed']}, layer={best_result['config']['layer_to_probe']}")
-        print(".4f"
+        print("\n🏆 Best Configuration:")
+        print(f"  Parameters: eps={best_result['config']['eps']}, probes={best_result['config']['probes_per_seed']}, layer={best_result['config']['layer_to_probe']}")
+        print(f"  entropy_avg={best_result.get('arm_entropy_avg', 0):.4f}")
     else:
         print("❌ All ARM tests failed - check configuration and hardware")
 
-    print("
-💡 Next Steps:"    print("1. If ARM runs successfully, implement actual generation steering")
+    print("\n💡 Next Steps:")
+    print("1. If ARM runs successfully, implement actual generation steering")
     print("2. Compare steered generations vs. baselines for style preservation")
     print("3. Try different models or fine-tune on Jabberwocky text")
     print("4. Implement genetic algorithm for hyperparameter optimization")

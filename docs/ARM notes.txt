@@ -1,0 +1,275 @@
+﻿I'll scan the README and key entry points to understand the repo’s purpose and workflow, then dive into the core modules to explain how it works end-to-end.
+
+
+[5 tools called]
+
+
+I'll scan the core modules (`arm_mapper.py`, `probe_generator.py`, `resonance_analyzer.py`, `topology_mapper.py`), config, and model interface to describe the pipeline accurately.
+
+
+[5 tools called]
+
+
+I read the READMEs and scanned the core modules and interface code. I’ll give you a succinct overview, how the pipeline works end-to-end, and a few quick thoughts.
+
+
+### What this repo is
+- **Purpose**: Aproximal Resonance Mapping (ARM) is a framework to analyze and steer transformer models by mapping local structure of their latent manifolds. Instead of a single linear “control vector,” ARM builds a richer, multi-dimensional control surface using spectral and topological signals.
+- **Deliverables**:
+  - A modular Python library (`arm_library`) with core algorithms for probing, spectral “resonance” analysis, and topological mapping.
+  - A Gradio-based web UI (`arm_interface.py` + `launch_interface.py`) to run analyses, visualize results, and (WIP) steer generation.
+  - Tests, examples, and a save/load results flow.
+
+
+### How it works (high-level)
+- **Inputs**: A set of seed prompts and model/layer/hyperparameter settings.
+- **Probe neighborhood**:
+  - For each prompt, get hidden states at a chosen layer (`TransformerModelInterface.get_hidden_at_layer`).
+  - Sample multiple small, normalized direction vectors around the pooled hidden representation and construct paths of perturbed hidden states (`ProbeGenerator.generate_probe_batch`).
+- **Collect activations**:
+  - For each perturbed hidden state, run the model forward starting at the probed layer (`TransformerModelInterface.forward_from_layer`).
+  - Extract a feature per point (e.g., mean-pooled hidden, or last-token logits) to assemble an activation matrix per prompt (`ARMMapper.collect_activation_matrix`).
+- **Resonance analysis (spectral)**:
+  - Run SVD on the centered activation matrix to get normalized singular values, top singular vectors, entropy, and participation ratio (`ResonanceAnalyzer.resonance_signature`).
+- **Topology analysis (persistent homology)**:
+  - Build pairwise distances between activation points, compute persistence diagrams with `ripser`, and summarize with simple stats (max/mean persistence, counts) (`TopologyMapper.local_persistence`).
+- **Descriptors and manifold graph**:
+  - Concatenate spectral features and topology features into a per-prompt descriptor (`TopologyMapper.compute_topological_descriptor`).
+  - Across prompts, form a kNN graph in a resonance feature space, compute a spectral embedding, and cluster to identify “attractor basins” (`TopologyMapper.build_resonance_graph`, `detect_attractor_basins`).
+- **Outputs**:
+  - Per-seed analyses (activation matrix, resonance signature, persistence features, descriptor).
+  - Global manifold artifacts (kNN adjacency, spectral embedding, clusters), plus convenience tools to find similar seeds and enable steering (`ARMMapper.find_similar_seeds`, steering helpers).
+
+
+### Key modules and roles
+- `arm_library/core/arm_mapper.py`: orchestrates the full pipeline across prompts (collect → analyze → topology → graph/clusters → descriptors).
+- `arm_library/core/probe_generator.py`: samples directions and constructs probe paths in hidden space.
+- `arm_library/core/resonance_analyzer.py`: SVD-based metrics (normalized singular values, entropy, participation ratio, explained variance).
+- `arm_library/core/topology_mapper.py`: persistent homology with ripser; builds kNN graph, spectral embedding, clustering; merges features into descriptors.
+- `arm_library/interfaces/model_interface.py`: HuggingFace wrapper to encode prompts, assemble pre-layer hidden states, and forward from an arbitrary layer.
+- `arm_interface.py`: Gradio UI with tabs for analysis, visualization (resonance plots, topology graph, descriptor heatmap), save/load, and (WIP) steered generation.
+
+
+### How to run
+- CLI/Example: See `examples/basic_arm_usage.py` for a minimal programmatic run.
+- Web UI:
+  - Install deps (note: top-level README mentions `requirements.txt` but repo includes `requirements-test.txt`):
+    ```bash
+    pip install -r requirements-test.txt
+    ```
+  - Launch:
+    ```bash
+    python launch_interface.py
+    ```
+  - Open `http://localhost:7860`, choose a model (e.g., `distilgpt2`), set seeds/probes/steps/ε/layer/modes, paste prompts, run analysis.
+
+
+### Thoughts (strengths, limitations, suggestions)
+- Strengths
+  - **Clear modular design**: Concise separation between probing, spectral analysis, topology, and interface; easy to extend/replace components.
+  - **Good defaults and explainability**: Entropy/participation ratio and diagrams provide intuitive signals; UI surfaces them well.
+  - **Topology angle**: Using persistent homology adds nontrivial structure beyond linear control vectors; the kNN + spectral embedding + clustering flow is sensible.
+
+
+- Limitations/risks
+  - **Dependency sensitivity**: `ripser` and scikit-learn are required for topology; missing them breaks `TopologyMapper` early.
+  - **Compute cost**: SVD plus persistent homology can be expensive; choice of `n_seeds × probes × steps` matters a lot.
+  - **Control/steering**: Generation steering is partially integrated and flagged “coming soon” in docs; ensure parity between UI and core steering APIs.
+  - **Documentation mismatch**: Top-level `README.md` references `requirements.txt`, but the repo includes `requirements-test.txt`.
+
+
+- Quick code quality notes (easy wins)
+  - In `arm_interface.py`, the import line likely misreferences `ModelConfig`:
+    - Current: `from arm_library.interfaces.model_interface import TransformerModelInterface, ModelConfig`
+    - Should be: `from arm_library.utils.config import ARMConfig, ModelConfig` (and only import `TransformerModelInterface` from the interface module).
+  - In `arm_interface.py`, after running analysis, set:
+    - `self.current_config = config` and `self.current_prompts = prompts` so Save works. Currently `save_results` requires both, but `analyze_prompts` doesn’t set them.
+  - In `examples/basic_arm_usage.py`, printing similar seeds looks broken:
+    - Line printing `".3f"` appears unintended; you likely meant to format `similarity`:
+      - e.g., `print(f"  {rank}. {seed_prompt} (similarity: {similarity:.3f})")`.
+
+
+- Future enhancements
+  - Add a small “fast path” option in UI to auto-tune `n_neighbors` and reduce SVD/topology costs for quick previews.
+  - Consider caching model hidden states per prompt/layer to amortize recomputation when tweaking probe params.
+  - Expand steering demos: show a basic “control vector” run and a “manifold signature” run in the UI with example indices and output.
+
+
+- Practical tips
+  - Start with `distilgpt2`, `n_seeds=3–5`, `probes=2–4`, `steps=3–5`, `eps=0.01–0.05`.
+  - Middle layers (e.g., 3–6) often yield richer signal than very early or very late layers.
+  - Ensure `ripser` is installed; otherwise `TopologyMapper` will raise immediately.
+
+
+Summary
+- This repo maps local latent neighborhoods around prompts, extracts spectral “resonance” signatures, computes persistent homology, and builds a topological graph for clustering and visualization. The architecture is clean and extensible; the UI is helpful. Fix a couple of small issues (`ModelConfig` import, saving config/prompts, example print formatting), and you’ll have a solid research and exploration tool with a path toward steerable generation.
+
+
+
+
+
+
+
+
+
+
+FOLLOWUP NOTES:
+Here’s my take, focused on feasibility, where it shines, and where it’s brittle.
+
+
+### Big picture
+- **Promising for reversible, per-request behavioral control.** ARM’s local, manifold-aware steering is a natural evolution of control vectors, giving more expressive “dials” without changing weights. That’s exactly the kind of “microsurgery at inference” you want.
+- **Best-fit use cases**: style/voice, sentiment, refusal/hedging posture, format adherence, topical stance, and other “behavioral” adjustments that live in mid-layer subspaces.
+
+
+### Where it’s likely to work
+- **Behavioral/style steering**: consistent tone, persona, formality, safety posture.
+- **Task-format compliance**: keep JSON schemas, bulleting, summarization focus.
+- **Cluster-targeting**: selecting clusters (attractor basins) aligned with desired behavior is more controllable than a single vector.
+
+
+### Where it’s hard/brittle
+- **Factuality/knowledge edits**: changing facts typically needs weight edits or fine-tuning; hidden-state nudges won’t reliably “install” knowledge.
+- **Long-horizon reasoning**: small local shifts can dissipate over decoding steps; effects may be inconsistent.
+- **OOD prompts / distribution shift**: local linearizations fail; steering can cause odd regressions.
+- **Latency/compute**: SVD + topology + per-step steering add overhead; needs careful parameterization/caching.
+
+
+### Comparisons
+- **vs. control vectors (RepE)**: ARM’s descriptors are richer and can be cluster-aware; more expressive than a single direction.
+- **vs. ROME/MEMIT/editing**: ARM is training-free and reversible but less stable for deep knowledge changes; editing is persistent but risky and harder to scope.
+- **vs. LoRA/test-time adapters**: ARM avoids training; LoRA is stronger but needs data/time. They’re complementary.
+
+
+### What to build next to make it production-credible
+- **Closed-loop controller**: tie steering strength to a task-specific scorer (reward model, constraint checker, or simple accuracy metric).
+- **Per-layer/adaptive steering**: learn layer- and token-position weights; mid layers often best, but adapt per task.
+- **Safety/robustness gates**: cap KL from baseline logits, add confidence thresholds, and detect OOD signatures.
+- **Caching**: cache hidden states and probe results per prompt/layer; amortize manifold construction.
+- **A/B eval suite**: baseline vs. control vector vs. ARM-manifold (signature and cluster-based) across:
+  - Summarization (ROUGE/BERTScore), JSON adherence (parse rate), harmlessness/helpfulness (classifier scores), instruction-following (Exact/EM, pass@k).
+  - Ablations: layer sweep, strength sweep, number of probes/steps, cluster vs. single-signature steering.
+  - Report latency deltas and failure modes.
+
+
+### Practical expectations
+- **Net**: very viable for “behavioral microsurgery” and task compliance; less so for knowledge/logic. With a feedback controller and careful layer/strength selection, it can reliably improve specific tasks without retraining—while remaining reversible and per-call tunable.
+
+
+- If you want, I can draft a minimal evaluation harness to compare baseline vs. ARM steering on a couple of tasks (JSON adherence and style transfer) and surface dose–response curves.
+
+
+
+
+
+
+
+
+
+
+“so what is this is done when a user request comes in, but only once, so the network is stable for the entire run?
+how about if the mechanism itself was controlled by a trained NN?”
+
+
+Short answer: yes to both, with caveats.
+
+
+### If you do it once per request
+- **Feasibility**: Compute the control plan at t=0 from the prompt, then hold it fixed for the whole decode. Apply the same control vector(s) each step at the same layer(s).
+- **Benefits**: Stable behavior, predictable style/format control, low jitter.
+- **Caveats**:
+  - Effect can decay across long generations; use a gentle coefficient schedule (constant or slow decay).
+  - Keep it mid-layer and modest strength; add a KL cap to avoid mode collapse.
+  - Latency: keep probes small (e.g., probes_per_seed 2–4, steps 2–3) and cache hidden states.
+
+
+Recommended: precompute one control vector or target signature at t=0, fix layer set, apply every step with constant strength, and cap KL from baseline logits.
+
+
+### If a trained NN controls the mechanism
+- **What it controls**: layer selection, per-layer coefficients, steering strength schedule, choice of signature/cluster, maybe eps/probe counts for the prepass.
+- **Inputs (state)**: prompt embedding, early hidden states, quick ARM descriptors (resonance + simple topo features), running decode stats (KL to base, entropy).
+- **Outputs (actions)**: per-layer gains α_l, a chosen signature/cluster id, and a strength schedule over tokens.
+- **Training**:
+  - Supervised warm-start from grid-search logs (pick params that maximized task metrics).
+  - Then black-box RL/bandits with task-specific rewards (JSON parse rate, BLEU/ROUGE, safety classifier score), plus penalties for latency and KL deviation.
+  - Safety: hard bounds on α_l and a KL guardrail; revert-to-baseline on OOD detection.
+
+
+Practical path:
+1) Start “static”: compute once at t=0, fixed layer(s) and coefficient.  
+2) Add a tiny controller (e.g., 2–3 layer MLP) to choose layer set and one scalar strength.  
+3) If useful, extend to per-layer gains and a simple time schedule (constant/linear/2-piece).  
+
+
+Where to integrate here: plug the fixed-vector application in `ARMMapper.create_controlled_generator()` and the controller policy just before generation; log task scores to train the controller. 
+
+
+- Net: once-per-request control is a solid, low-risk baseline for “behavioral microsurgery.” A learned controller can safely improve coverage and robustness if you wrap it with reward-driven tuning, KL/safety caps, and latency-aware choices.
+
+
+
+
+
+
+
+
+EVAL HARNESS:
+I'll read the steering and config modules to ensure the harness uses the correct APIs for controlled generation and configuration.
+
+
+[3 tools called]
+
+
+I'll create a small evaluation harness script that runs two tasks (JSON adherence and style transfer) comparing baseline vs. ARM steering over multiple strengths, saves CSVs and dose–response plots, and integrates with the existing steering APIs without requiring the topology module. Then I'll run a quick lint check on the new file.
+
+
+[1 tool called]
+
+
+I'll add a new script `examples/arm_eval_harness.py` that evaluates baseline vs. ARM steering on JSON adherence and style transfer, sweeping steering strengths, and writes CSV and plots.
+
+
+[1 tool called]
+
+
+I created the evaluation harness file and will check it for linter issues next, then proceed to implement the JSON and style tasks and plotting outputs.
+
+
+[2 tools called]
+
+
+I added a new script `examples/arm_eval_harness.py` that runs two tasks (JSON adherence and style transfer), sweeps steering strengths, and outputs CSVs plus dose–response plots under `arm_output/`.
+
+
+How to run
+- Install deps (ensure `transformers`, `torch`, `matplotlib` are installed).
+- Run:
+```bash
+python examples/arm_eval_harness.py
+```
+- Outputs:
+  - `arm_output/json_adherence_results.csv`, `arm_output/json_adherence_dose_response.png`
+  - `arm_output/style_transfer_results.csv`, `arm_output/style_transfer_dose_response.png`
+
+
+What it does
+- JSON adherence:
+  - Prompts the model to output a JSON object with required keys.
+  - Scores 1 if a parsable JSON object with those keys is found; else 0.
+- Style transfer:
+  - Generates in a whimsical/Jabberwocky-like style.
+  - Scores via a simple lexical marker heuristic.
+
+
+Dose–response
+- Sweeps strengths: 0.0 (baseline), 0.5, 1.0, 1.5, 2.0.
+- Plots score versus strength for both tasks.
+
+
+Notes
+- Uses control-vector steering via `ARMMapper.create_controlled_generator()` and `compute_steering_vector_from_manifold` with small exemplar sets. Topology is not required to run the harness.
+- You can tweak model, layer, max tokens, temperature, and strengths in the `EvalConfig` at the top of the file.
+
+
+- All tasks completed; the harness compiles cleanly with no linter issues.

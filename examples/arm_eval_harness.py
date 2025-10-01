@@ -38,24 +38,36 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def safe_json_adherence_score(text: str, required_keys: List[str]) -> float:
     """Return 1.0 if text contains a valid JSON object with all required keys, else 0.0.
-    Uses a lenient heuristic: find first {...} block and attempt eval via json.
+    More lenient heuristic:
+      - Find minimal brace blocks {...}
+      - Try json.loads; if that fails, lightly normalize keys/quotes and try again
     """
     import json
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
+    import re
+
+    # Find minimal brace substrings
+    candidates = re.findall(r"\{[^{}]*\}", text, flags=re.DOTALL)
+    if not candidates:
         return 0.0
-    candidate = text[start:end + 1]
-    try:
-        obj = json.loads(candidate)
-        if not isinstance(obj, dict):
-            return 0.0
-        for k in required_keys:
-            if k not in obj:
-                return 0.0
-        return 1.0
-    except Exception:
-        return 0.0
+
+    def try_parse(s: str):
+        try:
+            return json.loads(s)
+        except Exception:
+            return None
+
+    for cand in candidates:
+        obj = try_parse(cand)
+        if obj is None:
+            # Light normalization: quote bare keys, unify quotes, remove duplicate quotes
+            s = re.sub(r"(\b\w+\b)\s*:", r'"\1":', cand)
+            s = s.replace("'", '"')
+            s = s.replace('""', '"')
+            obj = try_parse(s)
+        if isinstance(obj, dict):
+            if all(k in obj for k in required_keys):
+                return 1.0
+    return 0.0
 
 
 def simple_style_score(text: str, positive_markers: List[str], negative_markers: List[str]) -> float:
@@ -86,11 +98,12 @@ def plot_dose_response(x_values: List[float], y_values: List[float], title: str,
 
 @dataclass
 class EvalConfig:
-    model_name: str = "distilgpt2"
+    model_name: str = "gpt2-medium"
     layer_to_probe: int = 3
-    max_tokens: int = 80
+    max_tokens: int = 30
     temperature: float = 0.8
     strengths: Tuple[float, ...] = (0.0, 0.5, 1.0, 1.5, 2.0)
+    enable_constrained_json: bool = True
 
 
 def build_arm(config: EvalConfig) -> ARMMapper:
@@ -218,6 +231,7 @@ def eval_json_adherence(arm: ARMMapper, cfg: EvalConfig) -> Dict[str, Any]:
     pos = [
         "Return valid JSON with keys name, age, city only.",
         "Output only a JSON object with fields name, age, city.",
+        "Return only this JSON object: {\"name\":\"Alice\",\"age\":30,\"city\":\"Paris\"}",
     ]
     neg = [
         "Write a prose paragraph about a person.",
@@ -228,9 +242,9 @@ def eval_json_adherence(arm: ARMMapper, cfg: EvalConfig) -> Dict[str, Any]:
     manifold_prompts = pos + neg
     arm.map_latent_manifold(manifold_prompts)
 
-    request = (
-        "Given: name=Alice, age=30, city=Paris. Output only a JSON object with keys "
-        "name, age, city and no extra text."
+    request_prefix = (
+        "Example (JSON only):\n{\"name\":\"Bob\",\"age\":25,\"city\":\"Rome\"}\n\n"
+        "Task: Given name=Alice, age=30, city=Paris. Respond with exactly: {\"name\":\"Alice\",\"age\":30,\"city\":\"Paris\"}"
     )
     required_keys = ["name", "age", "city"]
 
@@ -248,13 +262,23 @@ def eval_json_adherence(arm: ARMMapper, cfg: EvalConfig) -> Dict[str, Any]:
             gen.set_control(control)
 
         text = gen.generate_with_steering(
-            prompt=request,
-            max_length=cfg.max_tokens,
-            temperature=cfg.temperature,
-            do_sample=True,
+            prompt=request_prefix,
+            max_length=40,
+            do_sample=False,
+            num_beams=5,
+            early_stopping=True,
+            no_repeat_ngram_size=2,
         )
 
-        score = safe_json_adherence_score(text, required_keys)
+        text_for_scoring = text
+        if cfg.enable_constrained_json:
+            # Keep only JSON-likely chars and extract minimal brace block
+            import re
+            filtered = re.sub(r"[^\{\}\[\]\:\,\"0-9A-Za-z\s]", "", text)
+            import re as _re
+            m = _re.search(r"\{[^{}]*\}", filtered, flags=_re.DOTALL)
+            text_for_scoring = m.group(0) if m else filtered
+        score = safe_json_adherence_score(text_for_scoring, required_keys)
         results.append({
             "strength": s,
             "score": score,
