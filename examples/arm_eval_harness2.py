@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
 """
-Evaluation harness for ARM steering.
+Minimal evaluation harness for ARM steering.
 
-Compares baseline (no steering) vs. ARM steering across a sweep of steering strengths
-on three tasks:
+Compares baseline (no steering) vs. control-vector ARM steering across a sweep of
+steering strengths on two simple tasks:
 
-1) JSON adherence: Build manifold from fixed corpus of JSON examples; steer toward
-   average resonance signature. Measure valid JSON adherence with required keys.
+1) JSON adherence: Given an instruction and schema, measure whether output parses as JSON
+   and matches required keys/types (lenient heuristic).
 
-2) Style transfer: Use control-vector steering (pos vs neg exemplars). Score via
-   heuristic lexical markers.
-
-3) Manifold-signature: Build manifold from style exemplars; steer toward target
-   signature. Measure signature cosine similarity and report topology metrics
-   (n_clusters, silhouette).
+2) Style transfer: Generate in the style of a target author; score via a
+   shallow classifier heuristic using lexical markers and a simple keyword model.
 
 Outputs:
 - results CSV per task under arm_output/
 - dose–response plots (score vs. strength) under arm_output/
 
-This harness uses both control-vector and manifold-signature steering modes.
-JSON and manifold-signature evals build full topology; style transfer uses control vectors only.
+This harness uses ARM's control-vector steering only; it does not require topology.
 """
 
 import os
