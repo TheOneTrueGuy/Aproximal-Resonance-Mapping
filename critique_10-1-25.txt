@@ -1,0 +1,370 @@
+# ARM Critical Validation Plan — October 1, 2025
+
+## Priority Order for Addressing Criticisms
+
+This document outlines exercises to rigorously validate ARM's mathematical foundations,
+practical utility, and claims. Based on criticisms in Criticisms.txt and 
+math_rigor_criticisms-observations.md.
+
+================================================================================
+SECTION 1: MATHEMATICAL RIGOR & TERMINOLOGY
+================================================================================
+
+### Exercise 1.1: Audit "Resonance" Terminology
+**Goal**: Verify whether "resonance" is justified or just metaphorical
+**Tasks**:
+  [ ] Read through all code/docs and list every use of "resonance" terminology
+  [ ] For each usage, identify the actual mathematical operation (SVD, eigendecomp, etc.)
+  [ ] Document what physical/mathematical property would justify calling it "resonance"
+  [ ] Decide: Keep with formal definition, or rename to "spectral analysis"?
+**Deliverable**: resonance_audit.md with findings and recommendation
+**Time**: 2 hours
+
+### Exercise 1.2: Formalize Spectral Analysis
+**Goal**: Replace vague "resonance" with precise mathematical terminology
+**Tasks**:
+  [ ] Review resonance_analyzer.py - what is actually being computed?
+  [ ] Verify: Are we computing SVD of centered activation matrices? Yes/No
+  [ ] Verify: Are singular values being interpreted as spectral magnitudes? Yes/No
+  [ ] Check if entropy/participation ratio have precedent in manifold learning literature
+  [ ] Rename module to either:
+      Option A: spectral_analyzer.py (if dropping "resonance")
+      Option B: Keep name but add formal mathematical definition in docstring
+**Deliverable**: Updated module with rigorous mathematical definitions
+**Time**: 3 hours
+
+### Exercise 1.3: Validate "Oscillatory Response" Claims
+**Goal**: Test if activations actually exhibit oscillatory behavior
+**Tasks**:
+  [ ] Generate probe responses for 10 diverse prompts
+  [ ] Plot activation values along each probe direction
+  [ ] Look for: periodic patterns, damping, phase relationships
+  [ ] Statistical test: Compare to random walk (should be different if oscillatory)
+  [ ] Document: Do we see actual oscillations or just decay/monotonic change?
+**Deliverable**: oscillation_validation.ipynb with plots and statistical tests
+**Time**: 4 hours
+
+================================================================================
+SECTION 2: TOPOLOGY COMPONENT VALIDATION
+================================================================================
+
+### Exercise 2.1: Ablation Study - Topology vs Spectral Only
+**Goal**: Determine if topology features actually contribute to steering performance
+**Tasks**:
+  [ ] Create 3 versions of descriptor computation:
+      Version A: Spectral only (s_norm, entropy, PR)
+      Version B: Topology only (persistence features)
+      Version C: Combined (current implementation)
+  [ ] Run JSON adherence eval with each version
+  [ ] Run style transfer eval with each version
+  [ ] Compare: Does combined beat spectral-only? If not, topology may be vestigial
+**Deliverable**: ablation_results.csv with performance comparison
+**Time**: 4 hours
+
+### Exercise 2.2: Topology Interpretability
+**Goal**: Understand what persistent homology features represent behaviorally
+**Tasks**:
+  [ ] Run ARM on 20 seeds spanning different content types
+  [ ] For each seed, record: H0 persistence, H1 persistence, behavioral category
+  [ ] Look for patterns: Do seeds with similar behavior have similar topology?
+  [ ] Test correlation: persistence metrics vs. clustering quality
+  [ ] Visualize: persistence diagrams colored by behavioral category
+**Deliverable**: topology_interpretation.ipynb with correlation analysis
+**Time**: 5 hours
+
+### Exercise 2.3: Synthetic Manifold Validation
+**Goal**: Test topology extraction on manifolds with known ground truth
+**Tasks**:
+  [ ] Create synthetic datasets with known topology:
+      - Circle manifold (H1 = 1 loop)
+      - Sphere (H2 = 1 void)
+      - Torus (H1 = 2 loops)
+  [ ] Generate "fake" activations embedded in high-dim space
+  [ ] Run ARM topology mapper on these
+  [ ] Verify: Does persistent homology recover the known topology?
+**Deliverable**: synthetic_topology_test.py with ground truth comparisons
+**Time**: 6 hours
+
+================================================================================
+SECTION 3: BASELINE COMPARISONS
+================================================================================
+
+### Exercise 3.1: RepE Control Vector Baseline
+**Goal**: Compare ARM steering against standard Representation Engineering
+**Tasks**:
+  [ ] Implement simple RepE: mean(positive) - mean(negative) at layer L
+  [ ] Run JSON task with RepE steering at strengths [0.0, 0.5, 1.0, 2.0]
+  [ ] Run same task with ARM manifold-signature steering
+  [ ] Compare: JSON adherence, perplexity, fluency scores
+  [ ] Document: When does ARM outperform? When is RepE sufficient?
+**Deliverable**: repe_comparison.csv and analysis in baseline_comparisons.md
+**Time**: 4 hours
+
+### Exercise 3.2: Few-Shot Prompting Baseline
+**Goal**: Verify ARM adds value beyond just better prompting
+**Tasks**:
+  [ ] Establish few-shot baseline for JSON task (0-shot, 1-shot, 3-shot, 5-shot)
+  [ ] Measure JSON adherence for each few-shot condition
+  [ ] Compare: ARM with 2-shot context vs. pure 5-shot prompting
+  [ ] Document: Does ARM beat strong prompting? Or is it redundant?
+**Deliverable**: few_shot_baseline.csv with comparison analysis
+**Time**: 3 hours
+
+### Exercise 3.3: Fine-Tuning Baseline (Optional - Resource Intensive)
+**Goal**: Upper bound comparison - how does ARM compare to task-specific fine-tuning?
+**Tasks**:
+  [ ] Fine-tune distilgpt2 on 100 JSON examples (5 epochs)
+  [ ] Test JSON adherence of fine-tuned model
+  [ ] Compare to ARM steering (which uses no gradient updates)
+  [ ] Document: ARM as "zero-shot fine-tuning" vs. actual fine-tuning
+**Deliverable**: finetuning_comparison.md (only if time/resources permit)
+**Time**: 8 hours (skip if compute-limited)
+
+================================================================================
+SECTION 4: MULTI-TASK EVALUATION
+================================================================================
+
+### Exercise 4.1: Expand Task Coverage
+**Goal**: Move beyond single JSON task to diverse evaluation
+**Tasks**:
+  [ ] Implement 4 additional evaluation tasks:
+      Task 1: Style transfer (current - already working)
+      Task 2: Sentiment steering (positive vs negative)
+      Task 3: Formality control (casual vs formal)
+      Task 4: Factuality (correct vs incorrect facts)
+  [ ] Run ARM manifold-signature on each task
+  [ ] Measure task-specific metrics for each
+  [ ] Report: Success rate across diverse behavioral controls
+**Deliverable**: multi_task_eval.csv with 5 tasks × multiple metrics
+**Time**: 8 hours
+
+### Exercise 4.2: Cross-Model Validation
+**Goal**: Test if ARM generalizes across model architectures
+**Tasks**:
+  [ ] Run JSON task on 3 models: distilgpt2, gpt2, gpt2-medium
+  [ ] Run sentiment task on same 3 models
+  [ ] Compare: Does ARM work consistently? Model-specific tuning needed?
+  [ ] Check: Do manifold structures differ significantly across models?
+**Deliverable**: cross_model_results.csv and analysis
+**Time**: 6 hours
+
+### Exercise 4.3: Statistical Significance Testing
+**Goal**: Ensure results aren't just random fluctuations
+**Tasks**:
+  [ ] For JSON task, run ARM with 10 different random seeds
+  [ ] Compute: mean, std, 95% confidence interval for JSON adherence
+  [ ] Run t-test: ARM vs baseline (α = 0.05)
+  [ ] Report: Is improvement statistically significant?
+  [ ] Repeat for 2-3 other tasks
+**Deliverable**: significance_tests.csv with p-values and effect sizes
+**Time**: 4 hours
+
+================================================================================
+SECTION 5: MANIFOLD CONSTRUCTION ROBUSTNESS
+================================================================================
+
+### Exercise 5.1: Seed Count Sensitivity Analysis
+**Goal**: Determine minimum viable seeds for meaningful topology
+**Tasks**:
+  [ ] Run ARM with varying seed counts: [2, 5, 10, 20, 50, 100]
+  [ ] For each count, measure:
+      - Silhouette score (clustering quality)
+      - Steering effectiveness (JSON adherence)
+      - Computation time
+  [ ] Find: Minimum seeds for stable performance
+  [ ] Plot: Performance vs. seed count (diminishing returns curve)
+**Deliverable**: seed_sensitivity.png and recommendations
+**Time**: 5 hours
+
+### Exercise 5.2: Probe Configuration Optimization
+**Goal**: Validate default probe settings (probes_per_seed, steps_per_probe, eps)
+**Tasks**:
+  [ ] Grid search over configurations:
+      probes_per_seed: [4, 8, 16, 32]
+      steps_per_probe: [3, 5, 9, 15]
+      eps: [0.01, 0.03, 0.05, 0.1]
+  [ ] For each, measure: steering effectiveness, computation time
+  [ ] Find: Pareto frontier (performance vs. cost)
+  [ ] Validate: Are current defaults optimal or just arbitrary?
+**Deliverable**: probe_optimization.csv and recommended configs
+**Time**: 8 hours (can subsample grid if needed)
+
+### Exercise 5.3: Manifold Stability Test
+**Goal**: Check if manifold structure is consistent across runs
+**Tasks**:
+  [ ] Build manifold from same 10 seeds with 5 different random_seed values
+  [ ] Compute descriptor correlation between runs (should be high)
+  [ ] Measure cluster assignment stability (Adjusted Rand Index)
+  [ ] Test: If random_seed changes, does steering effectiveness change?
+  [ ] Document: Is ARM deterministic given fixed random_seed?
+**Deliverable**: stability_analysis.md with reproducibility assessment
+**Time**: 4 hours
+
+================================================================================
+SECTION 6: COMPUTATIONAL EFFICIENCY
+================================================================================
+
+### Exercise 6.1: Profile Performance Bottlenecks
+**Goal**: Identify where computation time is spent
+**Tasks**:
+  [ ] Use cProfile or line_profiler on map_latent_manifold()
+  [ ] Break down time by component:
+      - Model forward passes
+      - SVD computation
+      - Persistent homology (ripser)
+      - Graph construction
+      - Clustering
+  [ ] Identify: Which component is the bottleneck?
+**Deliverable**: profiling_results.txt with time breakdown
+**Time**: 2 hours
+
+### Exercise 6.2: Scaling Analysis
+**Goal**: Quantify computational cost vs. manifold size
+**Tasks**:
+  [ ] Measure wall-clock time for different (seeds × probes × steps):
+      Small: 5 × 4 × 3 = 60 forward passes
+      Medium: 20 × 8 × 5 = 800 forward passes
+      Large: 50 × 16 × 9 = 7,200 forward passes
+  [ ] Measure peak memory usage for each
+  [ ] Plot: Time/Memory vs. total forward passes (linear? quadratic?)
+  [ ] Extrapolate: Cost for production-scale analysis
+**Deliverable**: scaling_analysis.png with cost projections
+**Time**: 3 hours
+
+### Exercise 6.3: Optimization Opportunities
+**Goal**: Identify ways to reduce computational cost
+**Tasks**:
+  [ ] Test batch processing: Forward multiple probes simultaneously
+  [ ] Test caching: Reuse base activations across similar prompts
+  [ ] Test approximations: TruncatedSVD vs. full SVD
+  [ ] Measure: Speedup from each optimization
+  [ ] Document: Speed vs. quality tradeoffs
+**Deliverable**: optimization_recommendations.md with speedup measurements
+**Time**: 6 hours
+
+================================================================================
+SECTION 7: CLAIMS VALIDATION
+================================================================================
+
+### Exercise 7.1: "Emergent Recognition" Claim
+**Goal**: Test if boundaries emerge without manual labels
+**Tasks**:
+  [ ] Build manifold from mixed prompts (no labeling)
+  [ ] Use clustering to auto-detect groups
+  [ ] Compare auto-detected groups to ground truth categories
+  [ ] Measure: Cluster purity, Adjusted Rand Index
+  [ ] Verify: Does ARM find meaningful boundaries or just arbitrary clusters?
+**Deliverable**: emergent_recognition_test.ipynb with purity scores
+**Time**: 4 hours
+
+### Exercise 7.2: "Richer than Linear Control Vectors" Claim
+**Goal**: Quantify how much richer ARM manifolds are vs. single vectors
+**Tasks**:
+  [ ] Compare representational capacity:
+      Linear: 1 direction in hidden_dim space
+      ARM: Full descriptor dimensionality
+  [ ] Test: Can linear vector replicate ARM steering? (project ARM to 1D)
+  [ ] Measure: Behavioral diversity captured by ARM vs. linear
+  [ ] Quantify: Effective dimensionality of ARM control surface
+**Deliverable**: richness_comparison.md with dimensionality analysis
+**Time**: 5 hours
+
+### Exercise 7.3: "Topological Generalization" Claim
+**Goal**: Verify ARM captures structures beyond linear methods
+**Tasks**:
+  [ ] Create scenario where topology should matter (e.g., circular relationships)
+  [ ] Test: Does ARM detect topology? Does linear method fail?
+  [ ] Example: "morning→afternoon→evening→night→morning" (circular)
+  [ ] Verify: H1 persistence should detect the loop
+  [ ] Document: Concrete examples where topology provides value
+**Deliverable**: topology_value_demonstration.ipynb with case studies
+**Time**: 6 hours
+
+================================================================================
+SUMMARY & PRIORITIZATION
+================================================================================
+
+IMMEDIATE PRIORITY (Do First):
+  [X] Exercise 1.1 - Audit "Resonance" Terminology - COMPLETE ✓
+      Result: No empirical oscillations. "Resonance" metaphorical only.
+      Deliverables: resonance_audit.md, test_transformer_oscillations.py
+  [X] Exercise 2.1 - Ablation Study (Topology vs Spectral) - COMPLETE ✓
+      Result: Topology redundant, actually hurts when combined. Use spectral only.
+      Deliverables: exercise_2_1_ablation_fixed.py, ablation results
+  [ ] Exercise 3.1 - RepE Baseline Comparison - NEXT UP
+  [ ] Exercise 3.2 - Few-Shot Baseline
+  [ ] Exercise 4.3 - Statistical Significance Testing
+
+HIGH PRIORITY (Critical Validation):
+  [6] Exercise 4.1 - Multi-Task Evaluation
+  [7] Exercise 5.1 - Seed Count Sensitivity
+  [8] Exercise 2.2 - Topology Interpretability
+  [9] Exercise 1.2 - Formalize Spectral Analysis
+
+MEDIUM PRIORITY (Robustness):
+  [10] Exercise 4.2 - Cross-Model Validation
+  [11] Exercise 5.3 - Manifold Stability
+  [12] Exercise 6.1 - Profile Performance
+  [13] Exercise 7.1 - "Emergent Recognition" Validation
+
+LOWER PRIORITY (Nice to Have):
+  [14] Exercise 1.3 - Oscillatory Response Validation
+  [15] Exercise 2.3 - Synthetic Manifold Validation
+  [16] Exercise 5.2 - Probe Configuration Optimization
+  [17] Exercise 6.2 - Scaling Analysis
+  [18] Exercise 7.2 - Richness Comparison
+  [19] Exercise 7.3 - Topological Generalization Demo
+
+OPTIONAL (Resource Intensive):
+  [20] Exercise 3.3 - Fine-Tuning Baseline
+  [21] Exercise 6.3 - Optimization Opportunities
+
+================================================================================
+EXECUTION STRATEGY
+================================================================================
+
+Week 1: Foundation & Quick Wins
+  - Days 1-2: Exercises 1.1, 1.2 (terminology cleanup)
+  - Days 3-4: Exercise 2.1 (ablation study - critical!)
+  - Day 5: Exercise 3.1 (RepE baseline)
+
+Week 2: Comprehensive Validation
+  - Days 1-2: Exercise 4.1 (multi-task eval)
+  - Days 3-4: Exercise 4.3 (statistical testing)
+  - Day 5: Exercise 5.1 (seed sensitivity)
+
+Week 3: Deep Dive & Documentation
+  - Days 1-2: Exercise 2.2 (topology interpretation)
+  - Days 3-4: Exercise 4.2 (cross-model)
+  - Day 5: Compile findings into validation_report.md
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+
+After completing exercises, we should be able to answer:
+
+1. Is "resonance" terminology justified? → Exercise 1.1, 1.2, 1.3
+2. Does topology contribute or is it vestigial? → Exercise 2.1, 2.2, 2.3
+3. Is ARM better than simpler baselines? → Exercise 3.1, 3.2
+4. Does ARM generalize beyond JSON task? → Exercise 4.1, 4.2
+5. Are results statistically significant? → Exercise 4.3
+6. How many seeds needed for stable manifolds? → Exercise 5.1, 5.3
+7. What are computational costs? → Exercise 6.1, 6.2
+8. Do key claims hold up to scrutiny? → Exercise 7.1, 7.2, 7.3
+
+If answers are satisfactory, ARM is on solid ground.
+If answers are negative, we pivot to simpler/better-justified approaches.
+
+================================================================================
+NOTES & REMINDERS
+================================================================================
+
+- Be ruthlessly honest with results - negative findings are valuable
+- Document everything - failed experiments teach us too
+- If topology proves vestigial, don't be afraid to simplify
+- If RepE performs equally well, ARM needs better justification
+- Keep compute costs in mind - practical utility matters
+
+Good luck! Let's validate ARM rigorously. 🔬
+
